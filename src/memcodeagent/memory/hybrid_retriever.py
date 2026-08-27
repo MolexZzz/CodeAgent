@@ -61,6 +61,7 @@ class CodeDocument:
     line: int
     calls: list[str] = field(default_factory=list)
     inherits: list[str] = field(default_factory=list)
+    imports: list[str] = field(default_factory=list)
 
 
 class HybridRetriever:
@@ -68,9 +69,10 @@ class HybridRetriever:
     and task history. Builds code index from workspace Python files on demand.
     """
 
-    def __init__(self, workspace: Workspace, model_name: str = "sentence-transformers/all-MiniLM-L6-v2") -> None:
+    def __init__(self, workspace: Workspace, model_name: str = "sentence-transformers/all-MiniLM-L6-v2", graph_depth: int = 1) -> None:
         self.workspace = workspace
         self.model_name = model_name
+        self.graph_depth = graph_depth  # How many hops to traverse in the code graph
         self._model: "SentenceTransformer | None" = None
         self._code_docs: list[CodeDocument] = []
         self._code_bm25: BM25Okapi | None = None
@@ -80,6 +82,9 @@ class HybridRetriever:
         self._memory_path = self.workspace.root / ".memcode" / "memory.json"
         self._changed_files: list[str] = []
         self._failed_commands: list[str] = []
+        # Reverse indexes for impact analysis
+        self._called_by: dict[str, set[int]] = {}  # symbol_name -> set of doc indices that call it
+        self._subclasses: dict[str, set[int]] = {}  # class_name -> set of doc indices that inherit from it
 
     def _ensure_model(self) -> "SentenceTransformer":
         if self._model is None:
@@ -110,6 +115,7 @@ class HybridRetriever:
                         line=sym.line,
                         calls=sym.calls,
                         inherits=sym.inherits,
+                        imports=sym.imports,
                     )
                 )
 
@@ -125,10 +131,31 @@ class HybridRetriever:
         texts = [doc.text for doc in self._code_docs]
         self._code_vectors = model.encode(texts, convert_to_numpy=True, show_progress_bar=False)
 
+        # Build reverse indexes for impact analysis
+        self._build_reverse_indexes()
+
         # Persist to disk
         self._save_index()
 
-        return f"Indexed {len(python_files)} Python files, extracted {len(self._code_docs)} code symbols (BM25 + vectors)."
+        return f"Indexed {len(python_files)} Python files, extracted {len(self._code_docs)} code symbols (BM25 + vectors + reverse indexes)."
+
+    def _build_reverse_indexes(self) -> None:
+        """Build reverse indexes: called_by and subclasses for impact analysis."""
+        self._called_by = {}
+        self._subclasses = {}
+
+        for idx, doc in enumerate(self._code_docs):
+            # Build called_by: for each function this doc calls, record that this doc calls it
+            for called_name in doc.calls:
+                if called_name not in self._called_by:
+                    self._called_by[called_name] = set()
+                self._called_by[called_name].add(idx)
+
+            # Build subclasses: for each parent class, record that this doc inherits from it
+            for parent_name in doc.inherits:
+                if parent_name not in self._subclasses:
+                    self._subclasses[parent_name] = set()
+                self._subclasses[parent_name].add(idx)
 
     def _save_index(self) -> None:
         self._index_path.parent.mkdir(parents=True, exist_ok=True)
@@ -143,6 +170,7 @@ class HybridRetriever:
                     "line": doc.line,
                     "calls": doc.calls,
                     "inherits": doc.inherits,
+                    "imports": doc.imports,
                 }
                 for doc in self._code_docs
             ],
@@ -168,6 +196,7 @@ class HybridRetriever:
                     line=d["line"],
                     calls=d.get("calls", []),
                     inherits=d.get("inherits", []),
+                    imports=d.get("imports", []),
                 )
                 for d in payload.get("docs", [])
             ]
@@ -176,6 +205,8 @@ class HybridRetriever:
             tokenized = [_tokenize(doc.text) for doc in self._code_docs]
             self._code_bm25 = BM25Okapi(tokenized)
             self._code_vectors = np.load(self._vectors_path)
+            # Rebuild reverse indexes after loading
+            self._build_reverse_indexes()
             return True
         except (json.JSONDecodeError, OSError, KeyError):
             return False
@@ -202,7 +233,7 @@ class HybridRetriever:
         return RetrievalContext(items=items)
 
     def _retrieve_code(self, query: str) -> list[MemoryItem]:
-        """Hybrid code retrieval: BM25 + cosine similarity, combine scores, then expand via graph."""
+        """Hybrid code retrieval: BM25 + cosine similarity, graph expansion, then rerank top-K."""
         if not self._code_docs or not self._code_bm25 or self._code_vectors is None:
             return []
 
@@ -214,7 +245,7 @@ class HybridRetriever:
         bm25_max = bm25_scores.max() if bm25_scores.max() > 0 else 1.0
         bm25_norm = bm25_scores / bm25_max
 
-        # Vector similarity
+        # Vector similarity (query encoding - reused for reranking)
         model = self._ensure_model()
         query_vec = model.encode([query], convert_to_numpy=True, show_progress_bar=False)[0]
         cosine_scores = np.dot(self._code_vectors, query_vec) / (
@@ -233,16 +264,33 @@ class HybridRetriever:
                 continue
             initial_matches.add(idx)
 
-        # Graph expansion: 1-hop traversal to find related symbols
-        expanded_indices = self._expand_graph(initial_matches)
+        # Graph expansion: multi-hop traversal to find related symbols (returns hop distances)
+        expanded_with_hops = self._expand_graph(initial_matches)
+
+        # Rerank: score all expanded symbols by vector similarity, decay by hop distance
+        scored_items: list[tuple[float, int, str]] = []
+        for idx, hop_distance in expanded_with_hops.items():
+            if idx in initial_matches:
+                # Keep original hybrid score for initial matches (hop=0)
+                score = float(combined[idx])
+                reason = f"BM25={bm25_norm[idx]:.2f} vector={cosine_norm[idx]:.2f}"
+            else:
+                # Rerank expanded symbols: vector similarity with hop-based decay
+                # 1-hop: ×0.7, 2-hop: ×0.5, 3-hop: ×0.3
+                decay_factor = max(0.1, 0.9 - hop_distance * 0.2)
+                score = float(cosine_norm[idx]) * decay_factor
+                reason = f"graph-expanded hop={hop_distance} vector={cosine_norm[idx]:.2f}"
+            scored_items.append((score, idx, reason))
+
+        # Sort by score and take top-K (limit total results)
+        scored_items.sort(key=lambda x: x[0], reverse=True)
+        top_k = scored_items[:_MAX_RETRIEVED_CODE * 2]  # 2x initial limit after expansion
 
         # Build result items
         items: list[MemoryItem] = []
-        for idx in expanded_indices:
+        for score, idx, reason in top_k:
             doc = self._code_docs[idx]
             rel_path = doc.path.relative_to(self.workspace.root)
-            score = float(combined[idx]) if idx in initial_matches else 0.05  # lower score for expanded
-            reason = f"BM25={bm25_norm[idx]:.2f} vector={cosine_norm[idx]:.2f}" if idx in initial_matches else "graph-expanded"
             items.append(
                 MemoryItem(
                     kind=f"code_{doc.kind}",
@@ -254,23 +302,73 @@ class HybridRetriever:
             )
         return items
 
-    def _expand_graph(self, initial_indices: set[int]) -> set[int]:
-        """1-hop graph expansion: find symbols called by or inherited from initial matches."""
-        expanded = set(initial_indices)
+    def _expand_graph(self, initial_indices: set[int]) -> dict[int, int]:
+        """Multi-hop graph expansion: traverse relationships to configured depth.
+
+        Expands both forward relationships (calls, inherits, imports) and
+        reverse relationships (called_by, subclasses) for impact analysis.
+
+        Returns a dict mapping each reached index to its hop distance from the
+        nearest initial match (0 for initial matches themselves), so callers can
+        apply distance-based score decay.
+        """
+        # hop_distance[idx] = shortest number of hops from any initial match
+        hop_distance: dict[int, int] = {idx: 0 for idx in initial_indices}
+
+        if self.graph_depth < 1:
+            return hop_distance
+
         name_to_idx = {doc.name: i for i, doc in enumerate(self._code_docs)}
 
-        for idx in initial_indices:
-            doc = self._code_docs[idx]
-            # Add symbols this one calls
-            for called_name in doc.calls:
-                if called_name in name_to_idx:
-                    expanded.add(name_to_idx[called_name])
-            # Add parent classes
-            for parent_name in doc.inherits:
-                if parent_name in name_to_idx:
-                    expanded.add(name_to_idx[parent_name])
+        # Multi-hop traversal: each iteration adds one hop
+        frontier = set(initial_indices)
+        for hop in range(1, self.graph_depth + 1):
+            next_frontier = set()
 
-        return expanded
+            for idx in frontier:
+                doc = self._code_docs[idx]
+
+                # Forward relationships: symbols this one depends on
+                for called_name in doc.calls:
+                    if called_name in name_to_idx:
+                        target_idx = name_to_idx[called_name]
+                        if target_idx not in hop_distance:
+                            next_frontier.add(target_idx)
+                            hop_distance[target_idx] = hop
+
+                for parent_name in doc.inherits:
+                    if parent_name in name_to_idx:
+                        target_idx = name_to_idx[parent_name]
+                        if target_idx not in hop_distance:
+                            next_frontier.add(target_idx)
+                            hop_distance[target_idx] = hop
+
+                for import_name in doc.imports:
+                    if import_name in name_to_idx:
+                        target_idx = name_to_idx[import_name]
+                        if target_idx not in hop_distance:
+                            next_frontier.add(target_idx)
+                            hop_distance[target_idx] = hop
+
+                # Reverse relationships: symbols that depend on this one (impact analysis)
+                if doc.name in self._called_by:
+                    for caller_idx in self._called_by[doc.name]:
+                        if caller_idx not in hop_distance:
+                            next_frontier.add(caller_idx)
+                            hop_distance[caller_idx] = hop
+
+                if doc.name in self._subclasses:
+                    for subclass_idx in self._subclasses[doc.name]:
+                        if subclass_idx not in hop_distance:
+                            next_frontier.add(subclass_idx)
+                            hop_distance[subclass_idx] = hop
+
+            # Move to next hop
+            frontier = next_frontier
+            if not frontier:
+                break  # No more symbols to expand
+
+        return hop_distance
 
     def _retrieve_task_history(self, query: str) -> list[MemoryItem]:
         """Keyword-based task history retrieval (same logic as SimpleRetriever)."""

@@ -17,12 +17,15 @@ class CodeSymbol:
     line: int
     calls: list[str] = None  # Function names this symbol calls
     inherits: list[str] = None  # Parent class names (for classes)
+    imports: list[str] = None  # Imported symbols/modules used in this file
 
     def __post_init__(self) -> None:
         if self.calls is None:
             self.calls = []
         if self.inherits is None:
             self.inherits = []
+        if self.imports is None:
+            self.imports = []
 
     def to_text(self) -> str:
         """Return a plain-text representation for indexing and display."""
@@ -43,6 +46,9 @@ def extract_symbols(source_path: Path) -> list[CodeSymbol]:
     except (OSError, SyntaxError, UnicodeDecodeError):
         return []
 
+    # Extract imports at file level (shared by all symbols in this file)
+    file_imports = _extract_imports(tree)
+
     symbols: list[CodeSymbol] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef):
@@ -58,6 +64,7 @@ def extract_symbols(source_path: Path) -> list[CodeSymbol]:
                     path=source_path,
                     line=node.lineno,
                     calls=calls,
+                    imports=file_imports,
                 )
             )
         elif isinstance(node, ast.ClassDef):
@@ -72,6 +79,7 @@ def extract_symbols(source_path: Path) -> list[CodeSymbol]:
                     path=source_path,
                     line=node.lineno,
                     inherits=inherits,
+                    imports=file_imports,
                 )
             )
     return symbols
@@ -116,3 +124,25 @@ def _extract_base_classes(node: ast.ClassDef) -> list[str]:
             # Handle module.ClassName -> extract ClassName
             bases.append(base.attr)
     return bases
+
+
+def _extract_imports(tree: ast.AST) -> list[str]:
+    """Extract imported symbols from a module's AST.
+
+    Captures both 'import foo' and 'from foo import bar' statements.
+    Returns a list of imported names that can be cross-referenced.
+    """
+    imports = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            # import foo, bar
+            for alias in node.names:
+                imports.append(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            # from foo import bar, baz
+            if node.module:
+                imports.append(node.module)
+            for alias in node.names:
+                if alias.name != "*":
+                    imports.append(alias.name)
+    return imports
