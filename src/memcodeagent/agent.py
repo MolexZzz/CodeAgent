@@ -6,6 +6,7 @@ from typing import Any
 
 from rich.console import Console
 
+from memcodeagent.context_manager import ContextManager
 from memcodeagent.llm import LlmClient
 from memcodeagent.memory.retriever import RetrievalContext, SimpleRetriever
 from memcodeagent.tools import ToolExecutor
@@ -17,6 +18,8 @@ class AgentConfig:
     workspace: Path
     max_steps: int = 8
     dry_run: bool = False
+    max_context_turns: int = 20
+    max_context_tokens: int = 24000
 
 
 class CodingAgent:
@@ -29,6 +32,10 @@ class CodingAgent:
         self.llm = LlmClient()
         self.tools = ToolExecutor(self.workspace, dry_run=config.dry_run)
         self.retriever = SimpleRetriever(self.workspace)
+        self.context_manager = ContextManager(
+            max_turns=config.max_context_turns,
+            max_tokens=config.max_context_tokens,
+        )
         self.verbose = False
 
     def run(self, task: str) -> str:
@@ -82,6 +89,9 @@ class CodingAgent:
             elif user_input == "/workspace":
                 self.console.print(f"[cyan]Workspace:[/cyan] {self.workspace.root}")
                 continue
+            elif user_input == "/context":
+                self._print_context_stats(messages)
+                continue
             elif user_input.startswith("/"):
                 self.console.print(f"[red]Unknown command: {user_input}[/red] (type /help for a list)")
                 continue
@@ -94,7 +104,8 @@ class CodingAgent:
         """Core agent loop for single-turn mode: returns final answer or stops at max_steps."""
         for step in range(1, self.config.max_steps + 1):
             self.console.rule(f"[bold blue]Step {step}")
-            decision = self.llm.next_action(messages)
+            trimmed = self.context_manager.trim(messages)
+            decision = self.llm.next_action(trimmed)
             self.console.print(decision.to_display())
 
             messages.append(decision.assistant_message)
@@ -117,7 +128,8 @@ class CodingAgent:
     def _run_loop_interactive(self, messages: list[dict[str, Any]]) -> None:
         """Core agent loop for interactive mode: modifies messages in-place, no memory persistence per turn."""
         for step in range(1, self.config.max_steps + 1):
-            decision = self.llm.next_action(messages)
+            trimmed = self.context_manager.trim(messages)
+            decision = self.llm.next_action(trimmed)
 
             if decision.is_final:
                 # In interactive mode, just print and return; memory is built across the full session.
@@ -218,9 +230,29 @@ class CodingAgent:
             ("/model <name>", "Switch to a different model, e.g. /model deepseek-chat"),
             ("/verbose", "Toggle verbose mode (show full step/tool details)"),
             ("/workspace", "Show the current workspace root path"),
+            ("/context", "Show sliding-window context stats (turns/tokens kept vs total)"),
         ]
         for cmd, desc in rows:
             self.console.print(f"  [cyan]{cmd:<16}[/cyan] {desc}")
+
+    def _print_context_stats(self, messages: list[dict[str, Any]]) -> None:
+        """Show how the sliding window is trimming the conversation history."""
+        stats = self.context_manager.stats(messages)
+        self.console.rule("[bold cyan]Context Window (sliding window)")
+        self.console.print(
+            f"turns: {stats['kept_turns']} kept / {stats['total_turns']} total  "
+            f"(max_turns={self.context_manager.max_turns})"
+        )
+        self.console.print(
+            f"messages sent to model: {stats['kept_messages']} / {stats['total_messages']} in full history"
+        )
+        self.console.print(
+            f"estimated tokens sent: ~{stats['estimated_tokens_kept']} / "
+            f"~{stats['estimated_tokens_full']} full (max_tokens={self.context_manager.max_tokens})"
+        )
+        if stats["kept_turns"] < stats["total_turns"]:
+            dropped = stats["total_turns"] - stats["kept_turns"]
+            self.console.print(f"[yellow]{dropped} oldest turn(s) dropped from model context (still kept in /history)[/yellow]")
 
     def _handle_model_command(self, user_input: str) -> None:
         """Handle `/model` (show current) and `/model <name>` (switch model)."""
