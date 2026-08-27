@@ -178,9 +178,10 @@ class ToolExecutor:
             cwd=self.workspace.root,
             shell=True,
             executable=shell_executable,
-            text=True,
             capture_output=True,
             timeout=timeout_seconds,
+            encoding='utf-8',
+            errors='replace',  # Replace undecodable bytes with replacement character
         )
         output = f"exit_code={completed.returncode}\nSTDOUT:\n{completed.stdout}\nSTDERR:\n{completed.stderr}"
         return output[-6000:]
