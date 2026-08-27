@@ -14,19 +14,83 @@ MemCodeAgent 是为软件工程推免考核项目开发的：它与大语言模�
 
 ## 快速开始
 
-```powershell
+安装：
+
+```bash
 python -m pip install -e .[dev]
-$env:OPENAI_API_KEY="your-key"
-$env:MEMCODE_MODEL="gpt-4o-mini"
-mca run "阅读这个项目并总结下一步实现方向"
 ```
 
-可选环境变量：
+配置环境变量（根据你使用的平台选择）：
 
-```text
-OPENAI_API_KEY      调用真实模型所需
-OPENAI_BASE_URL     可选的 OpenAI 兼容端点
-MEMCODE_MODEL       模型名称，默认为 gpt-4o-mini
+**PowerShell:**
+```powershell
+$env:OPENAI_API_KEY="your-key"
+$env:OPENAI_BASE_URL="https://api.openai.com/v1"  # 可选，默认为 OpenAI 官方
+$env:MEMCODE_MODEL="gpt-4o-mini"  # 可选，默认为 gpt-4o-mini
+```
+
+**cmd (Windows):**
+```cmd
+set OPENAI_API_KEY=your-key
+set OPENAI_BASE_URL=https://api.openai.com/v1
+set MEMCODE_MODEL=gpt-4o-mini
+```
+
+**bash/zsh (Linux/macOS):**
+```bash
+export OPENAI_API_KEY="your-key"
+export OPENAI_BASE_URL="https://api.openai.com/v1"
+export MEMCODE_MODEL="gpt-4o-mini"
+```
+
+运行：
+
+```bash
+# 单次任务执行
+mca run "阅读这个项目并总结下一步实现方向"
+
+# 交互式 REPL
+mca chat
+```
+
+### 环境变量说明
+
+| 变量 | 必需 | 说明 |
+|------|------|------|
+| `OPENAI_API_KEY` | 是 | API 密钥（OpenAI 或兼容服务） |
+| `OPENAI_BASE_URL` | 否 | API 端点地址，默认为 `https://api.openai.com/v1` |
+| `MEMCODE_MODEL` | 否 | 模型名称，默认为 `gpt-4o-mini` |
+
+### 使用其他服务商
+
+本项目支持任何 OpenAI 兼容的 API 服务，包括但不限于：
+
+**DeepSeek:**
+```bash
+export OPENAI_API_KEY="your-deepseek-key"
+export OPENAI_BASE_URL="https://api.deepseek.com/v1"
+export MEMCODE_MODEL="deepseek-chat"
+```
+
+**月之暗面 Kimi:**
+```bash
+export OPENAI_API_KEY="your-kimi-key"
+export OPENAI_BASE_URL="https://api.moonshot.cn/v1"
+export MEMCODE_MODEL="moonshot-v1-8k"
+```
+
+**Azure OpenAI:**
+```bash
+export OPENAI_API_KEY="your-azure-key"
+export OPENAI_BASE_URL="https://your-resource.openai.azure.com/openai/deployments/your-deployment"
+export MEMCODE_MODEL="gpt-4"
+```
+
+**本地部署 (Ollama/vLLM 等):**
+```bash
+export OPENAI_API_KEY="dummy"  # 本地服务通常不需要真实密钥
+export OPENAI_BASE_URL="http://localhost:8000/v1"
+export MEMCODE_MODEL="qwen2.5-coder"
 ```
 
 ## 架构

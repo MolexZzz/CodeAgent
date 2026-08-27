@@ -140,10 +140,26 @@ class ToolExecutor:
         if self.dry_run:
             return f"Dry run: command was not executed: {command}"
         self.workspace.ensure_safe_command(command)
+
+        # Detect platform and use appropriate shell
+        import platform
+        import sys
+
+        shell_executable = None
+        if platform.system() == "Windows":
+            # Prefer PowerShell on Windows for better compatibility, fallback to cmd
+            if sys.executable:
+                # Try to find PowerShell
+                import shutil
+                pwsh = shutil.which("pwsh") or shutil.which("powershell")
+                if pwsh:
+                    shell_executable = pwsh
+
         completed = subprocess.run(
             command,
             cwd=self.workspace.root,
             shell=True,
+            executable=shell_executable,
             text=True,
             capture_output=True,
             timeout=timeout_seconds,
