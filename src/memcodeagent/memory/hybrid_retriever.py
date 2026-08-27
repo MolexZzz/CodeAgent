@@ -59,6 +59,8 @@ class CodeDocument:
     kind: str
     name: str
     line: int
+    calls: list[str] = field(default_factory=list)
+    inherits: list[str] = field(default_factory=list)
 
 
 class HybridRetriever:
@@ -66,7 +68,7 @@ class HybridRetriever:
     and task history. Builds code index from workspace Python files on demand.
     """
 
-    def __init__(self, workspace: Workspace, model_name: str = "all-MiniLM-L6-v2") -> None:
+    def __init__(self, workspace: Workspace, model_name: str = "sentence-transformers/all-MiniLM-L6-v2") -> None:
         self.workspace = workspace
         self.model_name = model_name
         self._model: "SentenceTransformer | None" = None
@@ -106,6 +108,8 @@ class HybridRetriever:
                         kind=sym.kind,
                         name=sym.name,
                         line=sym.line,
+                        calls=sym.calls,
+                        inherits=sym.inherits,
                     )
                 )
 
@@ -137,6 +141,8 @@ class HybridRetriever:
                     "kind": doc.kind,
                     "name": doc.name,
                     "line": doc.line,
+                    "calls": doc.calls,
+                    "inherits": doc.inherits,
                 }
                 for doc in self._code_docs
             ],
@@ -160,6 +166,8 @@ class HybridRetriever:
                     kind=d["kind"],
                     name=d["name"],
                     line=d["line"],
+                    calls=d.get("calls", []),
+                    inherits=d.get("inherits", []),
                 )
                 for d in payload.get("docs", [])
             ]
@@ -194,7 +202,7 @@ class HybridRetriever:
         return RetrievalContext(items=items)
 
     def _retrieve_code(self, query: str) -> list[MemoryItem]:
-        """Hybrid code retrieval: BM25 + cosine similarity, combine scores."""
+        """Hybrid code retrieval: BM25 + cosine similarity, combine scores, then expand via graph."""
         if not self._code_docs or not self._code_bm25 or self._code_vectors is None:
             return []
 
@@ -217,24 +225,52 @@ class HybridRetriever:
         # Combine: 50% BM25 + 50% vector
         combined = 0.5 * bm25_norm + 0.5 * cosine_norm
 
-        # Top-K
+        # Top-K initial matches
         top_indices = np.argsort(combined)[::-1][:_MAX_RETRIEVED_CODE]
-        items: list[MemoryItem] = []
+        initial_matches = set()
         for idx in top_indices:
             if combined[idx] < 0.1:  # skip very low scores
                 continue
+            initial_matches.add(idx)
+
+        # Graph expansion: 1-hop traversal to find related symbols
+        expanded_indices = self._expand_graph(initial_matches)
+
+        # Build result items
+        items: list[MemoryItem] = []
+        for idx in expanded_indices:
             doc = self._code_docs[idx]
             rel_path = doc.path.relative_to(self.workspace.root)
+            score = float(combined[idx]) if idx in initial_matches else 0.05  # lower score for expanded
+            reason = f"BM25={bm25_norm[idx]:.2f} vector={cosine_norm[idx]:.2f}" if idx in initial_matches else "graph-expanded"
             items.append(
                 MemoryItem(
                     kind=f"code_{doc.kind}",
                     text=f"{doc.name} at {rel_path}:{doc.line}\n{doc.text}",
                     path=doc.path,
-                    score=float(combined[idx]),
-                    reason=f"BM25={bm25_norm[idx]:.2f} vector={cosine_norm[idx]:.2f}",
+                    score=score,
+                    reason=reason,
                 )
             )
         return items
+
+    def _expand_graph(self, initial_indices: set[int]) -> set[int]:
+        """1-hop graph expansion: find symbols called by or inherited from initial matches."""
+        expanded = set(initial_indices)
+        name_to_idx = {doc.name: i for i, doc in enumerate(self._code_docs)}
+
+        for idx in initial_indices:
+            doc = self._code_docs[idx]
+            # Add symbols this one calls
+            for called_name in doc.calls:
+                if called_name in name_to_idx:
+                    expanded.add(name_to_idx[called_name])
+            # Add parent classes
+            for parent_name in doc.inherits:
+                if parent_name in name_to_idx:
+                    expanded.add(name_to_idx[parent_name])
+
+        return expanded
 
     def _retrieve_task_history(self, query: str) -> list[MemoryItem]:
         """Keyword-based task history retrieval (same logic as SimpleRetriever)."""

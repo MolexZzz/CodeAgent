@@ -15,6 +15,14 @@ class CodeSymbol:
     docstring: str
     path: Path
     line: int
+    calls: list[str] = None  # Function names this symbol calls
+    inherits: list[str] = None  # Parent class names (for classes)
+
+    def __post_init__(self) -> None:
+        if self.calls is None:
+            self.calls = []
+        if self.inherits is None:
+            self.inherits = []
 
     def to_text(self) -> str:
         """Return a plain-text representation for indexing and display."""
@@ -25,7 +33,7 @@ class CodeSymbol:
 
 
 def extract_symbols(source_path: Path) -> list[CodeSymbol]:
-    """Parse a Python file and extract top-level function/class definitions.
+    """Parse a Python file and extract top-level function/class definitions with relationships.
 
     Returns an empty list if the file cannot be parsed or is not valid Python.
     """
@@ -40,6 +48,7 @@ def extract_symbols(source_path: Path) -> list[CodeSymbol]:
         if isinstance(node, ast.FunctionDef):
             sig = _build_function_signature(node)
             doc = ast.get_docstring(node) or ""
+            calls = _extract_function_calls(node)
             symbols.append(
                 CodeSymbol(
                     kind="function",
@@ -48,10 +57,12 @@ def extract_symbols(source_path: Path) -> list[CodeSymbol]:
                     docstring=doc,
                     path=source_path,
                     line=node.lineno,
+                    calls=calls,
                 )
             )
         elif isinstance(node, ast.ClassDef):
             doc = ast.get_docstring(node) or ""
+            inherits = _extract_base_classes(node)
             symbols.append(
                 CodeSymbol(
                     kind="class",
@@ -60,6 +71,7 @@ def extract_symbols(source_path: Path) -> list[CodeSymbol]:
                     docstring=doc,
                     path=source_path,
                     line=node.lineno,
+                    inherits=inherits,
                 )
             )
     return symbols
@@ -78,3 +90,29 @@ def _build_function_signature(node: ast.FunctionDef) -> str:
     if node.returns:
         ret_str = f" -> {ast.unparse(node.returns)}"
     return f"def {node.name}({args_str}){ret_str}:"
+
+
+def _extract_function_calls(node: ast.FunctionDef) -> list[str]:
+    """Extract names of functions called within a FunctionDef node."""
+    calls = []
+    for child in ast.walk(node):
+        if isinstance(child, ast.Call):
+            # Handle simple function calls: foo()
+            if isinstance(child.func, ast.Name):
+                calls.append(child.func.id)
+            # Handle method calls: obj.method() - extract method name
+            elif isinstance(child.func, ast.Attribute):
+                calls.append(child.func.attr)
+    return calls
+
+
+def _extract_base_classes(node: ast.ClassDef) -> list[str]:
+    """Extract parent class names from a ClassDef node."""
+    bases = []
+    for base in node.bases:
+        if isinstance(base, ast.Name):
+            bases.append(base.id)
+        elif isinstance(base, ast.Attribute):
+            # Handle module.ClassName -> extract ClassName
+            bases.append(base.attr)
+    return bases
