@@ -8,7 +8,7 @@ from rich.console import Console
 
 from memcodeagent.context_manager import ContextManager
 from memcodeagent.llm import LlmClient
-from memcodeagent.memory.retriever import RetrievalContext, SimpleRetriever
+from memcodeagent.memory.hybrid_retriever import HybridRetriever, RetrievalContext
 from memcodeagent.tools import ToolExecutor
 from memcodeagent.workspace import Workspace
 
@@ -31,7 +31,7 @@ class CodingAgent:
         self.workspace = Workspace(config.workspace)
         self.llm = LlmClient()
         self.tools = ToolExecutor(self.workspace, dry_run=config.dry_run)
-        self.retriever = SimpleRetriever(self.workspace)
+        self.retriever = HybridRetriever(self.workspace)
         self.context_manager = ContextManager(
             max_turns=config.max_context_turns,
             max_tokens=config.max_context_tokens,
