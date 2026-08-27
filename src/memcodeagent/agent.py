@@ -16,7 +16,8 @@ from memcodeagent.workspace import Workspace
 @dataclass(slots=True)
 class AgentConfig:
     workspace: Path
-    max_steps: int = 8
+    max_steps: int = 8  # Deprecated: use max_error_retries instead
+    max_error_retries: int = 10  # Maximum retry attempts per error before giving up
     dry_run: bool = False
     max_context_turns: int = 20
     max_context_tokens: int = 24000
@@ -108,8 +109,18 @@ class CodingAgent:
             self._run_loop_interactive(messages)
 
     def _run_loop(self, messages: list[dict[str, Any]], task: str) -> str:
-        """Core agent loop for single-turn mode: returns final answer or stops at max_steps."""
-        for step in range(1, self.config.max_steps + 1):
+        """Core agent loop for single-turn mode: uses per-error retry counter.
+
+        When an error occurs (tool failure or test failure), the agent gets up to
+        max_error_retries attempts to fix it. Once fixed successfully, the counter
+        resets to 0 for the next error.
+        """
+        error_retry_count = 0
+        last_error_detected = False
+        step = 0
+
+        while True:
+            step += 1
             self.console.rule(f"[bold blue]Step {step}")
             trimmed = self.context_manager.trim(messages)
             decision = self.llm.next_action(trimmed)
@@ -123,20 +134,51 @@ class CodingAgent:
 
             # Execute all tool calls and collect observations.
             code_changed = False
+            current_step_has_error = False
+
             for tool_call in decision.tool_calls:
                 observation = self.tools.execute(tool_call.name, tool_call.args, tool_call.id)
                 self.console.print(observation.to_display())
                 messages.append(observation.to_message())
                 self.retriever.record_tool_result(tool_call.name, observation.ok, tool_call.args, observation.content)
+
+                if not observation.ok:
+                    current_step_has_error = True
+
                 if observation.ok and tool_call.name in _CODE_EDIT_TOOLS:
                     code_changed = True
 
+            # Run verification tests after code changes
             if code_changed:
-                self._run_verification_tests(messages)
+                test_failed = self._run_verification_tests(messages)
+                if test_failed:
+                    current_step_has_error = True
 
-        final = "Stopped because the maximum number of steps was reached."
-        self.retriever.remember_task(task, final)
-        return final
+            # Update error retry counter based on current step outcome
+            if current_step_has_error:
+                if last_error_detected:
+                    # Still in error state, increment retry count
+                    error_retry_count += 1
+                else:
+                    # New error detected, reset counter to 1
+                    error_retry_count = 1
+                    last_error_detected = True
+
+                # Debug output for testing
+                import os
+                if os.environ.get('DEBUG_RETRY'):
+                    print(f"[DEBUG] Step {step}: error detected, retry_count={error_retry_count}, max={self.config.max_error_retries}")
+
+                if error_retry_count >= self.config.max_error_retries:
+                    final = f"Stopped after {error_retry_count} failed attempts to fix the error."
+                    self.retriever.remember_task(task, final)
+                    return final
+            else:
+                # No error in this step - reset counter if we were in error state
+                if last_error_detected:
+                    self.console.print(f"[green]✓ Error fixed after {error_retry_count} attempt(s). Counter reset.[/green]")
+                    error_retry_count = 0
+                    last_error_detected = False
 
     def _resolve_test_command(self) -> str | None:
         """Pick the test command to run after a code edit, or None if tests are disabled/absent."""
@@ -148,14 +190,17 @@ class CodingAgent:
             return "python -m pytest tests/ -q --tb=short"
         return None
 
-    def _run_verification_tests(self, messages: list[dict[str, Any]]) -> None:
+    def _run_verification_tests(self, messages: list[dict[str, Any]]) -> bool:
         """Run the project's test suite after a code-modifying tool call and feed the
         result back into the conversation as an observation, so the model can react to
         regressions in the same step loop (the automated test-verification part of the
-        retry loop)."""
+        retry loop).
+
+        Returns True if tests failed, False if tests passed or were skipped.
+        """
         command = self._resolve_test_command()
         if not command:
-            return
+            return False
         self.console.rule("[bold magenta]Verification tests")
         observation = self.tools.execute("run_command", {"command": command}, tool_call_id=None)
         self.console.print(observation.to_display())
@@ -166,10 +211,16 @@ class CodingAgent:
             f"{observation.content}"
         )
         messages.append({"role": "user", "content": summary})
+        return not passed  # Return True if tests failed
 
     def _run_loop_interactive(self, messages: list[dict[str, Any]]) -> None:
-        """Core agent loop for interactive mode: modifies messages in-place, no memory persistence per turn."""
-        for step in range(1, self.config.max_steps + 1):
+        """Core agent loop for interactive mode: uses per-error retry counter."""
+        error_retry_count = 0
+        last_error_detected = False
+        step = 0
+
+        while True:
+            step += 1
             trimmed = self.context_manager.trim(messages)
             decision = self.llm.next_action(trimmed)
 
@@ -191,6 +242,8 @@ class CodingAgent:
 
             # Execute all tool calls and collect observations.
             code_changed = False
+            current_step_has_error = False
+
             for tool_call in decision.tool_calls:
                 observation = self.tools.execute(tool_call.name, tool_call.args, tool_call.id)
                 if self.verbose:
@@ -199,13 +252,38 @@ class CodingAgent:
                     status_icon = "✓" if observation.ok else "✗"
                     self.console.print(f"[dim]  {status_icon} {observation.tool_name}[/dim]")
                 messages.append(observation.to_message())
+
+                if not observation.ok:
+                    current_step_has_error = True
+
                 if observation.ok and tool_call.name in _CODE_EDIT_TOOLS:
                     code_changed = True
 
+            # Run verification tests after code changes
             if code_changed:
-                self._run_verification_tests(messages)
+                test_failed = self._run_verification_tests(messages)
+                if test_failed:
+                    current_step_has_error = True
 
-        self.console.print("[yellow]Stopped because the maximum number of steps was reached.[/yellow]")
+            # Update error retry counter based on current step outcome
+            if current_step_has_error:
+                if last_error_detected:
+                    # Still in error state, increment retry count
+                    error_retry_count += 1
+                else:
+                    # New error detected, reset counter to 1
+                    error_retry_count = 1
+                    last_error_detected = True
+
+                if error_retry_count >= self.config.max_error_retries:
+                    self.console.print(f"[yellow]Stopped after {error_retry_count} failed attempts to fix the error.[/yellow]")
+                    return
+            else:
+                # No error in this step - reset counter if we were in error state
+                if last_error_detected:
+                    self.console.print(f"[green]✓ Error fixed after {error_retry_count} attempt(s). Counter reset.[/green]")
+                    error_retry_count = 0
+                    last_error_detected = False
 
     def index_workspace(self) -> str:
         self.workspace.ensure_exists()

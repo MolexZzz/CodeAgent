@@ -27,11 +27,12 @@ def run(
 @app.command()
 def chat(
     workspace: Path = typer.Option(Path.cwd(), "--workspace", "-w", help="Workspace root."),
-    max_steps: int = typer.Option(8, "--max-steps", help="Maximum agent loop steps per turn."),
+    max_steps: int = typer.Option(8, "--max-steps", help="Deprecated: use --max-error-retries instead."),
+    max_error_retries: int = typer.Option(10, "--max-error-retries", help="Maximum retry attempts per error."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Plan without writing files or running commands."),
 ) -> None:
     """Start an interactive chat session with the coding agent."""
-    config = AgentConfig(workspace=workspace.resolve(), max_steps=max_steps, dry_run=dry_run)
+    config = AgentConfig(workspace=workspace.resolve(), max_steps=max_steps, max_error_retries=max_error_retries, dry_run=dry_run)
     agent = CodingAgent(config=config, console=console)
     agent.chat()
 
