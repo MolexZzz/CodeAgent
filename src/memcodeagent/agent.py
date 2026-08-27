@@ -4,7 +4,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from prompt_toolkit import PromptSession
+from prompt_toolkit.completion import WordCompleter
 from rich.console import Console
+from rich.status import Status
 
 from memcodeagent.context_manager import ContextManager
 from memcodeagent.llm import LlmClient
@@ -47,6 +50,11 @@ class CodingAgent:
             llm_client=self.llm,
         )
         self.verbose = False
+        self.streaming_mode = False
+        # Session-level token tracking
+        self.session_prompt_tokens = 0
+        self.session_completion_tokens = 0
+        self.session_total_tokens = 0
 
     def run(self, task: str) -> str:
         """Single-turn execution: retrieve context, run agent loop, persist memory."""
@@ -68,9 +76,17 @@ class CodingAgent:
 
         messages = self._initial_messages_chat()
 
+        # Setup autocomplete for slash commands
+        slash_commands = [
+            "/help", "/exit", "/quit", "/clear", "/history",
+            "/model", "/verbose", "/workspace", "/context", "/tokens", "/streaming"
+        ]
+        completer = WordCompleter(slash_commands, ignore_case=True, sentence=True)
+        session = PromptSession(completer=completer)
+
         while True:
             try:
-                user_input = input(">>> ").strip()
+                user_input = session.prompt(">>> ").strip()
             except (EOFError, KeyboardInterrupt):
                 self.console.print("\n[yellow]Exiting...[/yellow]")
                 break
@@ -96,11 +112,17 @@ class CodingAgent:
             elif user_input.startswith("/verbose"):
                 self._handle_verbose_command(user_input)
                 continue
+            elif user_input.startswith("/streaming"):
+                self._handle_streaming_command(user_input)
+                continue
             elif user_input == "/workspace":
                 self.console.print(f"[cyan]Workspace:[/cyan] {self.workspace.root}")
                 continue
             elif user_input == "/context":
                 self._print_context_stats(messages)
+                continue
+            elif user_input == "/tokens":
+                self._print_token_stats()
                 continue
             elif user_input.startswith("/"):
                 self.console.print(f"[red]Unknown command: {user_input}[/red] (type /help for a list)")
@@ -224,11 +246,39 @@ class CodingAgent:
         while True:
             step += 1
             trimmed = self.context_manager.trim(messages)
-            decision = self.llm.next_action(trimmed)
+
+            if self.streaming_mode:
+                # Stream tokens to the terminal as they arrive instead of blocking silently.
+                self.console.print("[green]Streaming:[/green]")
+
+                def _on_chunk(text: str) -> None:
+                    print(text, end="", flush=True)
+
+                decision = self.llm.next_action(trimmed, stream=True, on_chunk=_on_chunk)
+                if decision.content:
+                    print()  # newline after streamed content
+            else:
+                # Show spinner during LLM call
+                with Status("[cyan]Thinking...[/cyan]", console=self.console):
+                    decision = self.llm.next_action(trimmed)
+
+            # Update session token counters
+            self.session_prompt_tokens += decision.usage.prompt_tokens
+            self.session_completion_tokens += decision.usage.completion_tokens
+            self.session_total_tokens += decision.usage.total_tokens
+
+            # Display token usage
+            self.console.print(
+                f"[dim]Tokens: {decision.usage.total_tokens:,} "
+                f"(prompt: {decision.usage.prompt_tokens:,}, "
+                f"completion: {decision.usage.completion_tokens:,}) | "
+                f"Session total: {self.session_total_tokens:,}[/dim]"
+            )
 
             if decision.is_final:
                 # In interactive mode, just print and return; memory is built across the full session.
-                self.console.print(f"[green]{decision.content}[/green]")
+                if not self.streaming_mode:
+                    self.console.print(f"[green]{decision.content}[/green]")
                 messages.append(decision.assistant_message)
                 return
 
@@ -357,8 +407,10 @@ class CodingAgent:
             ("/model", "Show the current model"),
             ("/model <name>", "Switch to a different model, e.g. /model deepseek-chat"),
             ("/verbose", "Toggle verbose mode (show full step/tool details)"),
+            ("/streaming", "Toggle streaming mode (show model thinking in real-time)"),
             ("/workspace", "Show the current workspace root path"),
             ("/context", "Show sliding-window context stats (turns/tokens kept vs total)"),
+            ("/tokens", "Show session-level token usage statistics"),
         ]
         for cmd, desc in rows:
             self.console.print(f"  [cyan]{cmd:<16}[/cyan] {desc}")
@@ -412,3 +464,27 @@ class CodingAgent:
             self.verbose = not self.verbose
         state = "on" if self.verbose else "off"
         self.console.print(f"[cyan]Verbose mode:[/cyan] {state}")
+
+    def _print_token_stats(self) -> None:
+        """Display session-level token usage statistics."""
+        self.console.rule("[bold cyan]Session Token Usage")
+        self.console.print(f"Prompt tokens:     {self.session_prompt_tokens:,}")
+        self.console.print(f"Completion tokens: {self.session_completion_tokens:,}")
+        self.console.print(f"Total tokens:      {self.session_total_tokens:,}")
+
+    def _handle_streaming_command(self, user_input: str) -> None:
+        """Handle `/streaming` (toggle) and `/streaming on|off` (explicit set)."""
+        parts = user_input.split(maxsplit=1)
+        if len(parts) > 1:
+            arg = parts[1].strip().lower()
+            if arg in {"on", "true", "1"}:
+                self.streaming_mode = True
+            elif arg in {"off", "false", "0"}:
+                self.streaming_mode = False
+            else:
+                self.console.print(f"[red]Unknown argument: {arg}[/red] (use on/off)")
+                return
+        else:
+            self.streaming_mode = not self.streaming_mode
+        state = "on" if self.streaming_mode else "off"
+        self.console.print(f"[cyan]Streaming mode:[/cyan] {state}")

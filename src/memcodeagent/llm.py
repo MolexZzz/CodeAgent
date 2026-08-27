@@ -4,7 +4,7 @@ import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -138,12 +138,21 @@ class ToolCall:
 
 
 @dataclass(slots=True)
+class TokenUsage:
+    """Token usage statistics from an LLM call."""
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+
+
+@dataclass(slots=True)
 class AgentDecision:
     """One model turn: either a final natural-language answer or one/more tool calls."""
 
     content: str | None = None
     tool_calls: list[ToolCall] = field(default_factory=list)
     assistant_message: dict[str, Any] = field(default_factory=dict)
+    usage: TokenUsage = field(default_factory=TokenUsage)
 
     @property
     def is_final(self) -> bool:
@@ -168,7 +177,12 @@ class LlmClient:
         self.api_key = os.getenv("OPENAI_API_KEY")
         self.base_url = os.getenv("OPENAI_BASE_URL") or None
 
-    def next_action(self, messages: list[dict[str, Any]]) -> AgentDecision:
+    def next_action(
+        self,
+        messages: list[dict[str, Any]],
+        stream: bool = False,
+        on_chunk: Callable[[str], None] | None = None,
+    ) -> AgentDecision:
         if not self.api_key:
             return AgentDecision(
                 content=(
@@ -182,6 +196,10 @@ class LlmClient:
             )
 
         client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+
+        if stream:
+            return self._next_action_streaming(client, messages, on_chunk)
+
         response = client.chat.completions.create(
             model=self.model,
             messages=messages,
@@ -190,9 +208,104 @@ class LlmClient:
             temperature=0.2,
         )
         message = response.choices[0].message
-        return self._parse_decision(message)
+        usage = response.usage
+        token_usage = TokenUsage(
+            prompt_tokens=usage.prompt_tokens if usage else 0,
+            completion_tokens=usage.completion_tokens if usage else 0,
+            total_tokens=usage.total_tokens if usage else 0,
+        )
+        return self._parse_decision(message, token_usage)
 
-    def _parse_decision(self, message: Any) -> AgentDecision:
+    def _next_action_streaming(
+        self,
+        client: OpenAI,
+        messages: list[dict[str, Any]],
+        on_chunk: Callable[[str], None] | None,
+    ) -> AgentDecision:
+        """Stream a chat completion, progressively reporting content via `on_chunk`.
+
+        Tool calls arrive as incremental argument fragments across chunks; we
+        accumulate them by index and rebuild the final message shape once the
+        stream ends. Token usage is only available on the final chunk when
+        `stream_options={"include_usage": True}` is requested.
+        """
+        stream = client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            tools=TOOL_SCHEMAS,
+            tool_choice="auto",
+            temperature=0.2,
+            stream=True,
+            stream_options={"include_usage": True},
+        )
+
+        content_parts: list[str] = []
+        # tool call fragments keyed by index, since deltas can arrive split across chunks
+        tool_call_fragments: dict[int, dict[str, Any]] = {}
+        usage_data: Any = None
+
+        for chunk in stream:
+            if getattr(chunk, "usage", None):
+                usage_data = chunk.usage
+
+            if not chunk.choices:
+                continue
+
+            delta = chunk.choices[0].delta
+
+            if delta and delta.content:
+                content_parts.append(delta.content)
+                if on_chunk:
+                    on_chunk(delta.content)
+
+            if delta and delta.tool_calls:
+                for tc_delta in delta.tool_calls:
+                    idx = tc_delta.index
+                    frag = tool_call_fragments.setdefault(
+                        idx, {"id": None, "name": None, "arguments": ""}
+                    )
+                    if tc_delta.id:
+                        frag["id"] = tc_delta.id
+                    if tc_delta.function:
+                        if tc_delta.function.name:
+                            frag["name"] = tc_delta.function.name
+                        if tc_delta.function.arguments:
+                            frag["arguments"] += tc_delta.function.arguments
+
+        token_usage = TokenUsage(
+            prompt_tokens=usage_data.prompt_tokens if usage_data else 0,
+            completion_tokens=usage_data.completion_tokens if usage_data else 0,
+            total_tokens=usage_data.total_tokens if usage_data else 0,
+        )
+
+        full_content = "".join(content_parts) or None
+
+        tool_calls: list[ToolCall] = []
+        assistant_tool_calls: list[dict[str, Any]] = []
+        for idx in sorted(tool_call_fragments):
+            frag = tool_call_fragments[idx]
+            args = self._safe_json(frag["arguments"])
+            tool_calls.append(ToolCall(id=frag["id"], name=frag["name"], args=args))
+            assistant_tool_calls.append(
+                {
+                    "id": frag["id"],
+                    "type": "function",
+                    "function": {"name": frag["name"], "arguments": frag["arguments"]},
+                }
+            )
+
+        assistant_message: dict[str, Any] = {"role": "assistant", "content": full_content}
+        if assistant_tool_calls:
+            assistant_message["tool_calls"] = assistant_tool_calls
+
+        return AgentDecision(
+            content=full_content,
+            tool_calls=tool_calls,
+            assistant_message=assistant_message,
+            usage=token_usage,
+        )
+
+    def _parse_decision(self, message: Any, usage: TokenUsage | None = None) -> AgentDecision:
         raw_tool_calls = getattr(message, "tool_calls", None) or []
         tool_calls: list[ToolCall] = []
         assistant_tool_calls: list[dict[str, Any]] = []
@@ -215,6 +328,7 @@ class LlmClient:
             content=message.content,
             tool_calls=tool_calls,
             assistant_message=assistant_message,
+            usage=usage or TokenUsage(),
         )
 
     @staticmethod
