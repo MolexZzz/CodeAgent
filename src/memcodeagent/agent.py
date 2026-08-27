@@ -43,6 +43,8 @@ class CodingAgent:
         self.context_manager = ContextManager(
             max_turns=config.max_context_turns,
             max_tokens=config.max_context_tokens,
+            enable_summarization=True,
+            llm_client=self.llm,
         )
         self.verbose = False
 
