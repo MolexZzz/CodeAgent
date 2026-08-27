@@ -20,6 +20,13 @@ class AgentConfig:
     dry_run: bool = False
     max_context_turns: int = 20
     max_context_tokens: int = 24000
+    max_tool_retries: int = 2
+    run_tests_after_edit: bool = True
+    test_command: str | None = None  # None = auto-detect (pytest if a tests/ dir exists)
+
+
+# Tools that modify code on disk and should trigger a verification test run.
+_CODE_EDIT_TOOLS = {"write_file", "apply_patch"}
 
 
 class CodingAgent:
@@ -30,7 +37,7 @@ class CodingAgent:
         self.console = console or Console()
         self.workspace = Workspace(config.workspace)
         self.llm = LlmClient()
-        self.tools = ToolExecutor(self.workspace, dry_run=config.dry_run)
+        self.tools = ToolExecutor(self.workspace, dry_run=config.dry_run, max_tool_retries=config.max_tool_retries)
         self.retriever = HybridRetriever(self.workspace)
         self.context_manager = ContextManager(
             max_turns=config.max_context_turns,
@@ -115,15 +122,50 @@ class CodingAgent:
                 return decision.content or "(empty response)"
 
             # Execute all tool calls and collect observations.
+            code_changed = False
             for tool_call in decision.tool_calls:
                 observation = self.tools.execute(tool_call.name, tool_call.args, tool_call.id)
                 self.console.print(observation.to_display())
                 messages.append(observation.to_message())
                 self.retriever.record_tool_result(tool_call.name, observation.ok, tool_call.args, observation.content)
+                if observation.ok and tool_call.name in _CODE_EDIT_TOOLS:
+                    code_changed = True
+
+            if code_changed:
+                self._run_verification_tests(messages)
 
         final = "Stopped because the maximum number of steps was reached."
         self.retriever.remember_task(task, final)
         return final
+
+    def _resolve_test_command(self) -> str | None:
+        """Pick the test command to run after a code edit, or None if tests are disabled/absent."""
+        if not self.config.run_tests_after_edit:
+            return None
+        if self.config.test_command:
+            return self.config.test_command
+        if (self.workspace.root / "tests").is_dir():
+            return "python -m pytest tests/ -q --tb=short"
+        return None
+
+    def _run_verification_tests(self, messages: list[dict[str, Any]]) -> None:
+        """Run the project's test suite after a code-modifying tool call and feed the
+        result back into the conversation as an observation, so the model can react to
+        regressions in the same step loop (the automated test-verification part of the
+        retry loop)."""
+        command = self._resolve_test_command()
+        if not command:
+            return
+        self.console.rule("[bold magenta]Verification tests")
+        observation = self.tools.execute("run_command", {"command": command}, tool_call_id=None)
+        self.console.print(observation.to_display())
+        passed = observation.ok and "exit_code=0" in observation.content
+        status = "PASSED" if passed else "FAILED"
+        summary = (
+            f"Automated test verification after code edit: {status}.\n"
+            f"{observation.content}"
+        )
+        messages.append({"role": "user", "content": summary})
 
     def _run_loop_interactive(self, messages: list[dict[str, Any]]) -> None:
         """Core agent loop for interactive mode: modifies messages in-place, no memory persistence per turn."""
@@ -148,6 +190,7 @@ class CodingAgent:
             messages.append(decision.assistant_message)
 
             # Execute all tool calls and collect observations.
+            code_changed = False
             for tool_call in decision.tool_calls:
                 observation = self.tools.execute(tool_call.name, tool_call.args, tool_call.id)
                 if self.verbose:
@@ -156,6 +199,11 @@ class CodingAgent:
                     status_icon = "✓" if observation.ok else "✗"
                     self.console.print(f"[dim]  {status_icon} {observation.tool_name}[/dim]")
                 messages.append(observation.to_message())
+                if observation.ok and tool_call.name in _CODE_EDIT_TOOLS:
+                    code_changed = True
+
+            if code_changed:
+                self._run_verification_tests(messages)
 
         self.console.print("[yellow]Stopped because the maximum number of steps was reached.[/yellow]")
 

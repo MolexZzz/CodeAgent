@@ -32,10 +32,20 @@ class ToolObservation:
         return f"[{color}]Observation from {self.tool_name}:[/{color}]\n{self.content}"
 
 
+# Tools whose failures are worth retrying automatically without going back to
+# the model: run_command can fail transiently (timeouts, flaky installs,
+# momentary lock contention). write_file/apply_patch are deterministic given
+# the same args, so retrying them without a code change would just repeat the
+# same failure -- those are left to the normal LLM-driven retry (it sees the
+# error message and adjusts its next call).
+_AUTO_RETRY_TOOLS = {"run_command"}
+
+
 class ToolExecutor:
-    def __init__(self, workspace: Workspace, dry_run: bool = False) -> None:
+    def __init__(self, workspace: Workspace, dry_run: bool = False, max_tool_retries: int = 2) -> None:
         self.workspace = workspace
         self.dry_run = dry_run
+        self.max_tool_retries = max_tool_retries
 
     def execute(self, tool_name: str | None, args: dict[str, Any], tool_call_id: str | None = None) -> ToolObservation:
         if not tool_name:
@@ -43,10 +53,18 @@ class ToolExecutor:
         handler = getattr(self, f"_tool_{tool_name}", None)
         if handler is None:
             return ToolObservation(tool_name, False, f"Unknown tool: {tool_name}", tool_call_id)
-        try:
-            return ToolObservation(tool_name, True, handler(**args), tool_call_id)
-        except Exception as exc:
-            return ToolObservation(tool_name, False, f"{type(exc).__name__}: {exc}", tool_call_id)
+
+        max_attempts = 1 + (self.max_tool_retries if tool_name in _AUTO_RETRY_TOOLS else 0)
+        last_error: str | None = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return ToolObservation(tool_name, True, handler(**args), tool_call_id)
+            except Exception as exc:
+                last_error = f"{type(exc).__name__}: {exc}"
+                if attempt < max_attempts:
+                    continue
+        prefix = f"(failed after {max_attempts} attempt(s)) " if max_attempts > 1 else ""
+        return ToolObservation(tool_name, False, f"{prefix}{last_error}", tool_call_id)
 
     def _tool_list_files(self, glob: str = "**/*", limit: int = 200) -> str:
         paths = []
