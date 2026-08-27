@@ -29,6 +29,7 @@ class CodingAgent:
         self.llm = LlmClient()
         self.tools = ToolExecutor(self.workspace, dry_run=config.dry_run)
         self.retriever = SimpleRetriever(self.workspace)
+        self.verbose = False
 
     def run(self, task: str) -> str:
         """Single-turn execution: retrieve context, run agent loop, persist memory."""
@@ -44,7 +45,8 @@ class CodingAgent:
         """Multi-turn interactive REPL: maintains conversation history across user inputs."""
         self.workspace.ensure_exists()
         self.console.print("[bold cyan]MemCodeAgent REPL[/bold cyan]")
-        self.console.print("Commands: /exit, /clear, /history, /help")
+        self.console.print(f"model={self.llm.model}  workspace={self.workspace.root}")
+        self.console.print("Type /help to see available commands.")
         self.console.print()
 
         messages = self._initial_messages_chat()
@@ -59,7 +61,7 @@ class CodingAgent:
             if not user_input:
                 continue
 
-            if user_input == "/exit":
+            if user_input in {"/exit", "/quit"}:
                 break
             elif user_input == "/clear":
                 messages = self._initial_messages_chat()
@@ -69,7 +71,19 @@ class CodingAgent:
                 self._print_history(messages)
                 continue
             elif user_input == "/help":
-                self.console.print("[cyan]Commands:[/cyan] /exit, /clear, /history, /help")
+                self._print_help()
+                continue
+            elif user_input.startswith("/model"):
+                self._handle_model_command(user_input)
+                continue
+            elif user_input.startswith("/verbose"):
+                self._handle_verbose_command(user_input)
+                continue
+            elif user_input == "/workspace":
+                self.console.print(f"[cyan]Workspace:[/cyan] {self.workspace.root}")
+                continue
+            elif user_input.startswith("/"):
+                self.console.print(f"[red]Unknown command: {user_input}[/red] (type /help for a list)")
                 continue
 
             # Regular user message: add to conversation and run agent loop.
@@ -103,21 +117,32 @@ class CodingAgent:
     def _run_loop_interactive(self, messages: list[dict[str, Any]]) -> None:
         """Core agent loop for interactive mode: modifies messages in-place, no memory persistence per turn."""
         for step in range(1, self.config.max_steps + 1):
-            self.console.rule(f"[bold blue]Step {step}")
             decision = self.llm.next_action(messages)
-            self.console.print(decision.to_display())
-
-            messages.append(decision.assistant_message)
 
             if decision.is_final:
                 # In interactive mode, just print and return; memory is built across the full session.
                 self.console.print(f"[green]{decision.content}[/green]")
+                messages.append(decision.assistant_message)
                 return
+
+            # Tool calls: show simplified or detailed view based on verbose flag
+            if self.verbose:
+                self.console.rule(f"[bold blue]Step {step}")
+                self.console.print(decision.to_display())
+            else:
+                tool_names = [tc.name for tc in decision.tool_calls]
+                self.console.print(f"[dim]→ calling {', '.join(tool_names)}...[/dim]")
+
+            messages.append(decision.assistant_message)
 
             # Execute all tool calls and collect observations.
             for tool_call in decision.tool_calls:
                 observation = self.tools.execute(tool_call.name, tool_call.args, tool_call.id)
-                self.console.print(observation.to_display())
+                if self.verbose:
+                    self.console.print(observation.to_display())
+                else:
+                    status_icon = "✓" if observation.ok else "✗"
+                    self.console.print(f"[dim]  {status_icon} {observation.tool_name}[/dim]")
                 messages.append(observation.to_message())
 
         self.console.print("[yellow]Stopped because the maximum number of steps was reached.[/yellow]")
@@ -180,3 +205,50 @@ class CodingAgent:
             elif role == "tool":
                 tool_call_id = msg.get("tool_call_id", "?")
                 self.console.print(f"[dim]TOOL({tool_call_id}): {content[:80]}...[/dim]")
+
+    def _print_help(self) -> None:
+        """Print all available REPL slash commands."""
+        self.console.print("[bold cyan]Available commands:[/bold cyan]")
+        rows = [
+            ("/help", "Show this help message"),
+            ("/exit, /quit", "Exit the REPL"),
+            ("/clear", "Clear conversation history and start fresh"),
+            ("/history", "Show the full conversation history"),
+            ("/model", "Show the current model"),
+            ("/model <name>", "Switch to a different model, e.g. /model deepseek-chat"),
+            ("/verbose", "Toggle verbose mode (show full step/tool details)"),
+            ("/workspace", "Show the current workspace root path"),
+        ]
+        for cmd, desc in rows:
+            self.console.print(f"  [cyan]{cmd:<16}[/cyan] {desc}")
+
+    def _handle_model_command(self, user_input: str) -> None:
+        """Handle `/model` (show current) and `/model <name>` (switch model)."""
+        parts = user_input.split(maxsplit=1)
+        if len(parts) == 1:
+            self.console.print(f"[cyan]Current model:[/cyan] {self.llm.model}")
+            return
+        new_model = parts[1].strip()
+        if not new_model:
+            self.console.print(f"[cyan]Current model:[/cyan] {self.llm.model}")
+            return
+        old_model = self.llm.model
+        self.llm.model = new_model
+        self.console.print(f"[green]Model switched:[/green] {old_model} -> {new_model}")
+
+    def _handle_verbose_command(self, user_input: str) -> None:
+        """Handle `/verbose` (toggle) and `/verbose on|off` (explicit set)."""
+        parts = user_input.split(maxsplit=1)
+        if len(parts) > 1:
+            arg = parts[1].strip().lower()
+            if arg in {"on", "true", "1"}:
+                self.verbose = True
+            elif arg in {"off", "false", "0"}:
+                self.verbose = False
+            else:
+                self.console.print(f"[red]Unknown argument: {arg}[/red] (use on/off)")
+                return
+        else:
+            self.verbose = not self.verbose
+        state = "on" if self.verbose else "off"
+        self.console.print(f"[cyan]Verbose mode:[/cyan] {state}")
