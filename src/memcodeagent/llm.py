@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
 from openai import OpenAI
 
 # JSON-Schema tool definitions passed to the model's native tool-calling API.
@@ -158,6 +160,10 @@ class LlmClient:
     """Thin wrapper around an OpenAI-compatible chat model using its native tool-calling API."""
 
     def __init__(self) -> None:
+        # Load .env from current directory or home directory
+        load_dotenv()  # Load from current directory
+        load_dotenv(Path.home() / ".memcode" / ".env")  # Load from ~/.memcode/.env
+
         self.model = os.getenv("MEMCODE_MODEL", "gpt-4o-mini")
         self.api_key = os.getenv("OPENAI_API_KEY")
         self.base_url = os.getenv("OPENAI_BASE_URL") or None
