@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import questionary
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import WordCompleter
 from rich.console import Console
@@ -79,7 +80,7 @@ class CodingAgent:
         # Setup autocomplete for slash commands
         slash_commands = [
             "/help", "/exit", "/quit", "/clear", "/history",
-            "/model", "/verbose", "/workspace", "/context", "/tokens", "/streaming"
+            "/model", "/models", "/verbose", "/workspace", "/context", "/tokens", "/streaming"
         ]
         completer = WordCompleter(slash_commands, ignore_case=True, sentence=True)
         session = PromptSession(completer=completer)
@@ -105,6 +106,9 @@ class CodingAgent:
                 continue
             elif user_input == "/help":
                 self._print_help()
+                continue
+            elif user_input == "/models":
+                self._handle_models_command()
                 continue
             elif user_input.startswith("/model"):
                 self._handle_model_command(user_input)
@@ -404,8 +408,9 @@ class CodingAgent:
             ("/exit, /quit", "Exit the REPL"),
             ("/clear", "Clear conversation history and start fresh"),
             ("/history", "Show the full conversation history"),
-            ("/model", "Show the current model"),
+            ("/model", "Show current model and open an interactive menu to switch"),
             ("/model <name>", "Switch to a different model, e.g. /model deepseek-chat"),
+            ("/models", "List preset models available for selection"),
             ("/verbose", "Toggle verbose mode (show full step/tool details)"),
             ("/streaming", "Toggle streaming mode (show model thinking in real-time)"),
             ("/workspace", "Show the current workspace root path"),
@@ -434,19 +439,70 @@ class CodingAgent:
             dropped = stats["total_turns"] - stats["kept_turns"]
             self.console.print(f"[yellow]{dropped} oldest turn(s) dropped from model context (still kept in /history)[/yellow]")
 
+    def _handle_models_command(self) -> None:
+        """Handle `/models`: list all known models grouped by provider, with credential status."""
+        self.console.print("[bold cyan]Available models:[/bold cyan]")
+        by_provider: dict[str, list[str]] = {}
+        for name, config in self.llm.MODEL_REGISTRY.items():
+            by_provider.setdefault(config["provider"], []).append(name)
+
+        for provider, names in by_provider.items():
+            configured = self.llm._model_is_configured(names[0])
+            status = "[green]configured[/green]" if configured else "[red]no credentials[/red]"
+            self.console.print(f"[bold]{provider}[/bold] ({status})")
+            for name in names:
+                marker = "[green]*[/green]" if name == self.llm.model else " "
+                self.console.print(f"  {marker} {name}")
+
+        self.console.print("[dim]Use /model to open an interactive picker, or /model <name> to switch directly.[/dim]")
+
     def _handle_model_command(self, user_input: str) -> None:
-        """Handle `/model` (show current) and `/model <name>` (switch model)."""
+        """Handle `/model` (interactive picker) and `/model <name>` (direct switch)."""
         parts = user_input.split(maxsplit=1)
-        if len(parts) == 1:
-            self.console.print(f"[cyan]Current model:[/cyan] {self.llm.model}")
+        if len(parts) > 1 and parts[1].strip():
+            new_model = parts[1].strip()
+            old_model = self.llm.model
+            try:
+                self.llm.set_model(new_model, persist=True)
+            except ValueError as exc:
+                self.console.print(f"[red]{exc}[/red]")
+                return
+            self.console.print(f"[green]Model switched:[/green] {old_model} -> {new_model} [dim](saved as default)[/dim]")
             return
-        new_model = parts[1].strip()
-        if not new_model:
-            self.console.print(f"[cyan]Current model:[/cyan] {self.llm.model}")
+
+        # No argument: show an interactive menu with arrow-key navigation.
+        choices = list(self.llm.AVAILABLE_MODELS)
+        if self.llm.model not in choices:
+            choices.append(self.llm.model)
+
+        if not choices:
+            self.console.print(
+                "[red]No models are configured yet.[/red] Set at least one provider's API key "
+                "(e.g. DEEPSEEK_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY) in your .env file."
+            )
             return
+
+        self.console.print(f"[cyan]Current model:[/cyan] {self.llm.model}")
+        try:
+            selected = questionary.select(
+                "Select a model (this will be saved as default):",
+                choices=choices,
+                default=self.llm.model if self.llm.model in choices else None,
+            ).ask()
+        except Exception:
+            selected = None
+
+        if not selected or selected == self.llm.model:
+            self.console.print("[dim]Model unchanged.[/dim]")
+            return
+
         old_model = self.llm.model
-        self.llm.model = new_model
-        self.console.print(f"[green]Model switched:[/green] {old_model} -> {new_model}")
+        try:
+            self.llm.set_model(selected, persist=True)
+        except ValueError as exc:
+            self.console.print(f"[red]{exc}[/red]")
+            return
+        self.console.print(f"[green]Model switched:[/green] {old_model} -> {selected} [dim](saved as default)[/dim]")
 
     def _handle_verbose_command(self, user_input: str) -> None:
         """Handle `/verbose` (toggle) and `/verbose on|off` (explicit set)."""

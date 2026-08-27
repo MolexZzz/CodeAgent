@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from dotenv import load_dotenv
+from dotenv import load_dotenv, set_key
 from openai import OpenAI
 
 # JSON-Schema tool definitions passed to the model's native tool-calling API.
@@ -168,14 +168,125 @@ class AgentDecision:
 class LlmClient:
     """Thin wrapper around an OpenAI-compatible chat model using its native tool-calling API."""
 
+    # Model registry: each model knows which provider it belongs to and what credentials to use.
+    # Structure: {model_name: {"provider": "...", "api_key_env": "...", "base_url_env": "..."}}
+    MODEL_REGISTRY = {
+        "deepseek-chat": {
+            "provider": "DeepSeek",
+            "api_key_env": "DEEPSEEK_API_KEY",
+            "base_url_env": "DEEPSEEK_BASE_URL",
+        },
+        "deepseek-reasoner": {
+            "provider": "DeepSeek",
+            "api_key_env": "DEEPSEEK_API_KEY",
+            "base_url_env": "DEEPSEEK_BASE_URL",
+        },
+        "gpt-4o": {
+            "provider": "OpenAI",
+            "api_key_env": "OPENAI_API_KEY",
+            "base_url_env": "OPENAI_BASE_URL",
+        },
+        "gpt-4o-mini": {
+            "provider": "OpenAI",
+            "api_key_env": "OPENAI_API_KEY",
+            "base_url_env": "OPENAI_BASE_URL",
+        },
+        "gpt-4-turbo": {
+            "provider": "OpenAI",
+            "api_key_env": "OPENAI_API_KEY",
+            "base_url_env": "OPENAI_BASE_URL",
+        },
+        "claude-3-5-sonnet-20241022": {
+            "provider": "Anthropic",
+            "api_key_env": "ANTHROPIC_API_KEY",
+            "base_url_env": "ANTHROPIC_BASE_URL",
+        },
+        "claude-3-5-haiku-20241022": {
+            "provider": "Anthropic",
+            "api_key_env": "ANTHROPIC_API_KEY",
+            "base_url_env": "ANTHROPIC_BASE_URL",
+        },
+    }
+
+    @property
+    def AVAILABLE_MODELS(self) -> list[str]:
+        """Return list of models that have credentials configured."""
+        return [name for name in self.MODEL_REGISTRY if self._model_is_configured(name)]
+
     def __init__(self) -> None:
         # Load .env from current directory or home directory
         load_dotenv()  # Load from current directory
         load_dotenv(Path.home() / ".memcode" / ".env")  # Load from ~/.memcode/.env
 
-        self.model = os.getenv("MEMCODE_MODEL", "gpt-4o-mini")
-        self.api_key = os.getenv("OPENAI_API_KEY")
-        self.base_url = os.getenv("OPENAI_BASE_URL") or None
+        self._env_path = self._find_env_path()
+
+        # Load the saved default model, or pick the first configured one
+        saved_model = os.getenv("MEMCODE_MODEL")
+        if saved_model and self._model_is_configured(saved_model):
+            self.model = saved_model
+        else:
+            # Fallback: pick the first model that has credentials configured
+            configured = self.AVAILABLE_MODELS
+            self.model = configured[0] if configured else "gpt-4o-mini"
+
+        # Credentials are resolved dynamically per request in next_action()
+        self.api_key: str | None = None
+        self.base_url: str | None = None
+
+    def _find_env_path(self) -> Path:
+        """Find the .env file path (current directory or ~/.memcode/.env)."""
+        local_env = Path.cwd() / ".env"
+        if local_env.exists():
+            return local_env
+        home_env = Path.home() / ".memcode" / ".env"
+        home_env.parent.mkdir(parents=True, exist_ok=True)
+        return home_env
+
+    def _model_is_configured(self, model: str) -> bool:
+        """Check if a model's provider credentials are configured in the environment."""
+        if model not in self.MODEL_REGISTRY:
+            return False
+        config = self.MODEL_REGISTRY[model]
+        api_key = os.getenv(config["api_key_env"])
+        return api_key is not None and api_key.strip() != ""
+
+    def _resolve_credentials(self, model: str) -> tuple[str | None, str | None]:
+        """Resolve API key and base URL for the given model from environment variables."""
+        if model not in self.MODEL_REGISTRY:
+            return None, None
+        config = self.MODEL_REGISTRY[model]
+        api_key = os.getenv(config["api_key_env"])
+        base_url = os.getenv(config["base_url_env"]) or None
+        return api_key, base_url
+
+    def get_model_info(self, model: str) -> dict[str, str]:
+        """Get provider info and configuration status for a model."""
+        if model not in self.MODEL_REGISTRY:
+            return {"provider": "Unknown", "configured": "No"}
+        config = self.MODEL_REGISTRY[model]
+        configured = "Yes" if self._model_is_configured(model) else "No"
+        return {
+            "provider": config["provider"],
+            "configured": configured,
+            "api_key_env": config["api_key_env"],
+            "base_url_env": config["base_url_env"],
+        }
+
+    def set_model(self, model: str, persist: bool = False) -> None:
+        """Switch to a different model, optionally persisting to .env.
+
+        Raises ValueError if the model's provider credentials are not configured.
+        """
+        if not self._model_is_configured(model):
+            info = self.get_model_info(model)
+            raise ValueError(
+                f"Cannot switch to '{model}': missing credentials for provider "
+                f"{info.get('provider', 'Unknown')}. Set {info.get('api_key_env', '<API_KEY>')} "
+                "in your .env file first."
+            )
+        self.model = model
+        if persist:
+            set_key(str(self._env_path), "MEMCODE_MODEL", model)
 
     def next_action(
         self,
@@ -183,19 +294,24 @@ class LlmClient:
         stream: bool = False,
         on_chunk: Callable[[str], None] | None = None,
     ) -> AgentDecision:
-        if not self.api_key:
+        api_key, base_url = self._resolve_credentials(self.model)
+        self.api_key, self.base_url = api_key, base_url
+
+        if not api_key:
+            info = self.get_model_info(self.model)
+            api_key_env = info.get("api_key_env", "OPENAI_API_KEY")
             return AgentDecision(
                 content=(
-                    "LLM is not configured yet. Set OPENAI_API_KEY, then rerun the task. "
+                    f"LLM is not configured yet. Set {api_key_env}, then rerun the task. "
                     "The CLI framework, tool executor, and memory layer are ready."
                 ),
                 assistant_message={
                     "role": "assistant",
-                    "content": "LLM is not configured yet. Set OPENAI_API_KEY, then rerun the task.",
+                    "content": f"LLM is not configured yet. Set {api_key_env}, then rerun the task.",
                 },
             )
 
-        client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+        client = OpenAI(api_key=api_key, base_url=base_url)
 
         if stream:
             return self._next_action_streaming(client, messages, on_chunk)

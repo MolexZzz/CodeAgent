@@ -19,12 +19,20 @@ def test_agent_decision_is_not_final_when_tool_calls_present() -> None:
     assert not decision.is_final
 
 
-def test_llm_client_returns_placeholder_when_no_api_key() -> None:
-    client = LlmClient()
-    client.api_key = None
-    decision = client.next_action([{"role": "user", "content": "Hello"}])
-    assert decision.is_final
-    assert "not configured" in decision.content
+def test_llm_client_returns_placeholder_when_no_api_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Use a temporary directory with no .env file and clear all API keys
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("MEMCODE_MODEL", raising=False)
+
+    # Also ensure load_dotenv doesn't find the real .env
+    with patch("memcodeagent.llm.load_dotenv"):
+        client = LlmClient()
+        decision = client.next_action([{"role": "user", "content": "Hello"}])
+        assert decision.is_final
+        assert "not configured" in decision.content
 
 
 @patch("memcodeagent.llm.OpenAI")

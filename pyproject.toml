@@ -22,6 +22,7 @@ dependencies = [
   "rank-bm25>=0.2.2",
   "sentence-transformers>=2.2.0",
   "prompt-toolkit>=3.0.0",
+  "questionary>=2.0.0",
 ]
 
 [project.optional-dependencies]
