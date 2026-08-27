@@ -5,14 +5,17 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 from rank_bm25 import BM25Okapi
-from sentence_transformers import SentenceTransformer
 
 from memcodeagent.memory.code_indexer import extract_symbols
 from memcodeagent.memory.schema import MemoryItem, TaskRecord
 from memcodeagent.workspace import Workspace
+
+if TYPE_CHECKING:
+    from sentence_transformers import SentenceTransformer
 
 _STOPWORDS = {
     "the", "a", "an", "to", "of", "in", "on", "for", "and", "or", "is", "are",
@@ -66,7 +69,7 @@ class HybridRetriever:
     def __init__(self, workspace: Workspace, model_name: str = "all-MiniLM-L6-v2") -> None:
         self.workspace = workspace
         self.model_name = model_name
-        self._model: SentenceTransformer | None = None
+        self._model: "SentenceTransformer | None" = None
         self._code_docs: list[CodeDocument] = []
         self._code_bm25: BM25Okapi | None = None
         self._code_vectors: np.ndarray | None = None
@@ -76,8 +79,10 @@ class HybridRetriever:
         self._changed_files: list[str] = []
         self._failed_commands: list[str] = []
 
-    def _ensure_model(self) -> SentenceTransformer:
+    def _ensure_model(self) -> "SentenceTransformer":
         if self._model is None:
+            # Lazy import: only load sentence_transformers when actually needed
+            from sentence_transformers import SentenceTransformer
             self._model = SentenceTransformer(self.model_name)
         return self._model
 
