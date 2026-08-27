@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import difflib
 import subprocess
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 from memcodeagent.workspace import Workspace
+
+# How much file content to show back to the model when a patch edit fails to
+# match, so it can see why and retry with corrected text.
+_CONTEXT_SNIPPET_CHARS = 800
 
 
 @dataclass(slots=True)
@@ -13,9 +17,14 @@ class ToolObservation:
     tool_name: str
     ok: bool
     content: str
+    tool_call_id: str | None = None
 
     def to_message(self) -> dict[str, str]:
         status = "ok" if self.ok else "error"
+        text = f"({status}) {self.content}"
+        if self.tool_call_id:
+            return {"role": "tool", "tool_call_id": self.tool_call_id, "content": text}
+        # Fallback for callers without a native tool_call_id (e.g. tests).
         return {"role": "user", "content": f"Observation from {self.tool_name} ({status}):\n{self.content}"}
 
     def to_display(self) -> str:
@@ -28,16 +37,16 @@ class ToolExecutor:
         self.workspace = workspace
         self.dry_run = dry_run
 
-    def execute(self, tool_name: str | None, args: dict[str, Any]) -> ToolObservation:
+    def execute(self, tool_name: str | None, args: dict[str, Any], tool_call_id: str | None = None) -> ToolObservation:
         if not tool_name:
-            return ToolObservation("unknown", False, "Missing tool name.")
+            return ToolObservation("unknown", False, "Missing tool name.", tool_call_id)
         handler = getattr(self, f"_tool_{tool_name}", None)
         if handler is None:
-            return ToolObservation(tool_name, False, f"Unknown tool: {tool_name}")
+            return ToolObservation(tool_name, False, f"Unknown tool: {tool_name}", tool_call_id)
         try:
-            return ToolObservation(tool_name, True, handler(**args))
+            return ToolObservation(tool_name, True, handler(**args), tool_call_id)
         except Exception as exc:
-            return ToolObservation(tool_name, False, f"{type(exc).__name__}: {exc}")
+            return ToolObservation(tool_name, False, f"{type(exc).__name__}: {exc}", tool_call_id)
 
     def _tool_list_files(self, glob: str = "**/*", limit: int = 200) -> str:
         paths = []
@@ -71,15 +80,61 @@ class ToolExecutor:
                         return "\n".join(matches)
         return "\n".join(matches) or "(no matches)"
 
-    def _tool_apply_patch(self, path: str, old: str, new: str) -> str:
+    def _tool_write_file(self, path: str, content: str, overwrite: bool = False) -> str:
         if self.dry_run:
-            return "Dry run: patch was not applied."
+            return f"Dry run: would write {path} ({len(content)} chars)."
         file_path = self.workspace.resolve_inside(path)
-        content = file_path.read_text(encoding="utf-8")
-        if old not in content:
-            raise ValueError("old text was not found in target file")
-        file_path.write_text(content.replace(old, new, 1), encoding="utf-8")
-        return f"Patched {file_path.relative_to(self.workspace.root).as_posix()}"
+        if file_path.exists() and not overwrite:
+            raise ValueError(
+                f"{path} already exists. Pass overwrite=true to replace it, or use apply_patch to edit it."
+            )
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_text(content, encoding="utf-8")
+        action = "Overwrote" if file_path.exists() else "Created"
+        return f"{action} {file_path.relative_to(self.workspace.root).as_posix()} ({len(content)} chars)"
+
+    def _tool_apply_patch(self, path: str, edits: list[dict[str, str]]) -> str:
+        if self.dry_run:
+            return f"Dry run: would apply {len(edits)} edit(s) to {path}."
+        if not edits:
+            raise ValueError("edits must contain at least one {old, new} entry")
+
+        file_path = self.workspace.resolve_inside(path)
+        original = file_path.read_text(encoding="utf-8")
+        updated = original
+        for index, edit in enumerate(edits):
+            old = edit.get("old", "")
+            new = edit.get("new", "")
+            if old == "":
+                raise ValueError(f"edit #{index + 1}: 'old' must not be empty")
+            occurrences = updated.count(old)
+            if occurrences == 0:
+                snippet = updated[:_CONTEXT_SNIPPET_CHARS]
+                raise ValueError(
+                    f"edit #{index + 1}: text not found in {path}.\n"
+                    f"--- searched for ---\n{old}\n"
+                    f"--- current file content (first {len(snippet)} chars) ---\n{snippet}"
+                )
+            if occurrences > 1:
+                raise ValueError(
+                    f"edit #{index + 1}: text matched {occurrences} times in {path}; "
+                    "add more surrounding context so it matches exactly once."
+                )
+            updated = updated.replace(old, new, 1)
+
+        if updated == original:
+            return f"No changes applied to {path} (edits produced identical content)."
+
+        file_path.write_text(updated, encoding="utf-8")
+        diff = difflib.unified_diff(
+            original.splitlines(keepends=True),
+            updated.splitlines(keepends=True),
+            fromfile=path,
+            tofile=path,
+        )
+        diff_text = "".join(diff)
+        rel = file_path.relative_to(self.workspace.root).as_posix()
+        return f"Patched {rel} with {len(edits)} edit(s):\n{diff_text}"
 
     def _tool_run_command(self, command: str, timeout_seconds: int = 30) -> str:
         if self.dry_run:
