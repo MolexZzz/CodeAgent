@@ -21,7 +21,7 @@ from memcodeagent.policy import ToolPolicy
 from memcodeagent.runtime import RuntimeEvent
 from memcodeagent.verification import VerificationKind, classify_verification
 from memcodeagent.tools import ToolExecutor, ToolObservation
-from memcodeagent.ui import AgentEvent, AgentEventKind, format_agent_event
+from memcodeagent.ui import AgentEvent, AgentEventKind, ToolEvent, ToolEventKind, format_agent_event
 from memcodeagent.workspace import Workspace
 
 
@@ -34,6 +34,8 @@ class AgentConfig:
     max_context_turns: int = 20
     max_context_tokens: int = 24000
     max_tool_retries: int = 2
+    max_read_bytes: int = 24000
+    max_replan_count: int = 3
     run_tests_after_edit: bool = True
     test_command: str | None = None  # None = auto-detect (pytest if a tests/ dir exists)
     approval_required: bool = False
@@ -138,7 +140,12 @@ class CodingAgent:
         self.console = console or Console()
         self.workspace = Workspace(config.workspace)
         self.llm = LlmClient()
-        self.tools = ToolExecutor(self.workspace, dry_run=config.dry_run, max_tool_retries=config.max_tool_retries)
+        self.tools = ToolExecutor(
+            self.workspace,
+            dry_run=config.dry_run,
+            max_tool_retries=config.max_tool_retries,
+            max_read_bytes=config.max_read_bytes,
+        )
         self.retriever = HybridRetriever(self.workspace)
         self.context_manager = ContextManager(
             max_turns=config.max_context_turns,
@@ -155,6 +162,7 @@ class CodingAgent:
             confirmation_callback=lambda tool_call, policy=None: self._confirm_tool(
                 tool_call.name, tool_call.args, policy
             ),
+            event_callback=self._handle_runtime_event,
         )
         self.verbose = False
         self.streaming_mode = False
@@ -173,6 +181,8 @@ class CodingAgent:
         self._test_attempts = 0
         self._verification_unresolved_error = False
         self._last_diff_summary = ""
+        self._last_verification_command = ""
+        self._last_completion_report = ""
 
     def run(self, task: str) -> str:
         """Single-turn execution: retrieve context, run agent loop, persist memory."""
@@ -322,7 +332,7 @@ class CodingAgent:
                 last_result = "任务尚未完成，已暂停。"
                 break
             self._record_usage(result.decision)
-            last_result = result.decision.content or last_result
+            last_result = self._strip_tool_protocol(result.decision.content or last_result)
             if result.interrupted:
                 self.controller.mark_interrupted()
                 last_result = "任务已被用户中断。"
@@ -379,8 +389,9 @@ class CodingAgent:
             self._save_session(messages)
 
             if decision.is_final:
-                self.retriever.remember_task(task, decision.content or "(empty response)")
-                return decision.content or "(empty response)"
+                final = self._strip_tool_protocol(decision.content or "(empty response)")
+                self.retriever.remember_task(task, final)
+                return final
 
             # Execute all tool calls and collect observations.
             code_changed = False
@@ -465,6 +476,7 @@ class CodingAgent:
             self._verification_passed = True
             self._last_verification_kind = None
             self._verification_unresolved_error = False
+            self._last_verification_command = ""
             return False
         if self._test_attempts >= self.config.max_test_attempts:
             messages.append(
@@ -479,6 +491,7 @@ class CodingAgent:
             self._last_verification_kind = VerificationKind.COMMAND_ERROR
             return True
         self._test_attempts += 1
+        self._last_verification_command = command
         self.console.rule("[bold magenta]Verification tests")
         observation = self.tools.execute("run_command", {"command": command}, tool_call_id=None)
         self.console.print(observation.to_display())
@@ -497,6 +510,7 @@ class CodingAgent:
             f"[{verification.kind.value}] ({verification.summary}).\n"
             f"{self._summarize_test_output(observation.content)}"
         )
+        self._last_completion_report = summary
         messages.append({"role": "user", "content": summary})
         return not passed  # Return True if tests failed
 
@@ -629,6 +643,7 @@ class CodingAgent:
         last_error_detected = False
         self._stop_requested = False
         continuation_count = 0
+        replan_count = 0
         seen_calls: set[tuple[str, str]] = set()
         phase = "INSPECTING"
         pending_edits = 0
@@ -736,6 +751,16 @@ class CodingAgent:
                         test_failed = self._run_verification_tests(messages)
                         pending_edits = 0
                         if test_failed:
+                            replan_count += 1
+                            if replan_count >= self.config.max_replan_count:
+                                self._print_agent_event(
+                                    AgentEventKind.PAUSED,
+                                    "重规划次数已耗尽",
+                                    "测试失败后已多次重新回到实现，任务暂停",
+                                )
+                                self._phase = "PAUSED"
+                                self._save_session(messages)
+                                return
                             phase = "FIXING"
                             self._print_phase(phase, step, self.config.max_steps)
                             continue
@@ -744,6 +769,16 @@ class CodingAgent:
                     if has_changes:
                         self._print_diff_summary(messages)
                     if not self._final_completion_checks(messages):
+                        replan_count += 1
+                        if replan_count >= self.config.max_replan_count:
+                            self._print_agent_event(
+                                AgentEventKind.PAUSED,
+                                "重规划次数已耗尽",
+                                "验收条件仍未满足，任务暂停",
+                            )
+                            self._phase = "PAUSED"
+                            self._save_session(messages)
+                            return
                         self.console.print("[yellow]最终完成条件未满足，任务继续。[/yellow]")
                         phase = "FIXING"
                         continue
@@ -751,7 +786,7 @@ class CodingAgent:
                         self._print_agent_event(
                             AgentEventKind.DONE,
                             "任务已完成",
-                            decision.content or "",
+                            self._build_completion_report(),
                         )
                     self._phase = "COMPLETED"
                     self._save_session(messages)
@@ -785,7 +820,7 @@ class CodingAgent:
                     alert = self.controller.last_progress_alert
                     self._print_agent_event(AgentEventKind.ALERT, "进度监控", alert.message)
                     self.controller.last_progress_alert = None
-                    if alert.kind in {"no_progress", "tool_monotony"}:
+                    if alert.kind in {"no_progress", "tool_monotony", "phase_monotony"}:
                         self._print_agent_event(
                             AgentEventKind.PAUSED,
                             "任务因连续无进展而暂停",
@@ -820,6 +855,16 @@ class CodingAgent:
                         return
                     if test_failed:
                         current_step_has_error = True
+                        replan_count += 1
+                        if replan_count >= self.config.max_replan_count:
+                            self._print_agent_event(
+                                AgentEventKind.PAUSED,
+                                "重规划次数已耗尽",
+                                "连续测试失败后已超过允许的重新规划次数",
+                            )
+                            self._phase = "PAUSED"
+                            self._save_session(messages)
+                            return
                         phase = "FIXING"
                         self.controller.mark_test_result(False)
                     else:
@@ -880,7 +925,7 @@ class CodingAgent:
             return False
 
         self.console.rule("[bold cyan]Plan")
-        self.console.print(decision.content or "(No plan returned.)")
+        self.console.print(self._strip_tool_protocol(decision.content or "(No plan returned.)"))
         self.console.print("[dim]No files or commands have been changed during planning.[/dim]")
         self.controller.transition(RuntimeEvent.PLAN_READY)
         try:
@@ -895,8 +940,9 @@ class CodingAgent:
         # Keep the approved plan in the conversation so later tool decisions
         # can follow the same outline without relying on hidden state.
         if decision.content:
-            self._plan_text = decision.content
-            messages.append({"role": "assistant", "content": f"计划：\n{decision.content}"})
+            cleaned_plan = self._strip_tool_protocol(decision.content)
+            self._plan_text = cleaned_plan
+            messages.append({"role": "assistant", "content": f"计划：\n{cleaned_plan}"})
         messages.append({"role": "user", "content": "计划已确认。现在开始执行，按计划检查、修改并验证项目。"})
         self.controller.transition(RuntimeEvent.USER_APPROVED)
         self._phase = "IMPLEMENTING"
@@ -931,7 +977,7 @@ class CodingAgent:
             if decision.is_final:
                 if decision.content:
                     messages.append(decision.assistant_message)
-                    self.console.print(f"[dim]{decision.content}[/dim]")
+                    self.console.print(f"[dim]{self._strip_tool_protocol(decision.content)}[/dim]")
                 break
             messages.append(decision.assistant_message)
             for tool_call in decision.tool_calls:
@@ -1134,6 +1180,36 @@ class CodingAgent:
     def _print_agent_event(self, kind: AgentEventKind, message: str, detail: str = "") -> None:
         self.console.print(f"[yellow]{format_agent_event(AgentEvent(kind, message, detail))}[/yellow]")
 
+    def _handle_runtime_event(self, event: Any) -> None:
+        if not isinstance(event, ToolEvent):
+            return
+        if event.kind == ToolEventKind.CALL:
+            payload = event.payload or {}
+            args = payload.get("args") if isinstance(payload, dict) else {}
+            self.console.print(
+                f"[dim]→ tool {event.tool}{self._tool_target(event.tool, args if isinstance(args, dict) else {})}[/dim]"
+            )
+
+    @staticmethod
+    def _strip_tool_protocol(text: str) -> str:
+        cleaned = text.replace("<tool_call>", "").replace("</tool_call>", "")
+        cleaned = cleaned.replace("<tool-result>", "").replace("</tool-result>", "")
+        return cleaned
+
+    def _build_completion_report(self) -> str:
+        parts: list[str] = []
+        if self._last_diff_summary:
+            parts.append(self._last_diff_summary[:800])
+        if self._last_verification_command:
+            parts.append(f"Verification command: {self._last_verification_command}")
+        if self._last_verification_kind is not None:
+            parts.append(f"Verification result: {self._last_verification_kind.value}")
+        if self._verification_unresolved_error:
+            parts.append("Unresolved issue: verification environment or command error")
+        if self._last_completion_report:
+            parts.append(self._last_completion_report[:300])
+        return " | ".join(parts) if parts else "No completion report available."
+
     def _requires_approval(self, tool_name: str) -> bool:
         """Require confirmation only for operations that can change state."""
         return self.config.approval_required and tool_name in {"write_file", "apply_patch", "run_command"}
@@ -1180,7 +1256,7 @@ class CodingAgent:
         except TypeError:
             decision = self.llm.next_action(plan_messages)
         self.console.rule("[bold cyan]Plan (no changes made)")
-        self.console.print(decision.content or "(no plan returned)")
+        self.console.print(self._strip_tool_protocol(decision.content or "(no plan returned)"))
 
     def _save_session(self, messages: list[dict[str, Any]]) -> None:
         import json

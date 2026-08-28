@@ -97,6 +97,7 @@ class AgentController:
         }.get(self.task_mode)
         if requested is not None:
             self.state_machine.transition(requested)
+        self.progress_monitor.record_phase(self.phase.value)
 
     def transition(self, event: RuntimeEvent) -> bool:
         """Advance runtime state through a guarded event."""
@@ -106,6 +107,7 @@ class AgentController:
             self.last_transition_error = str(exc)
             return False
         self.last_transition_error = None
+        self.last_progress_alert = self.progress_monitor.record_phase(self.phase.value)
         return True
 
     def mark_implementation_done(self) -> bool:

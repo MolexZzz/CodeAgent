@@ -148,9 +148,9 @@ TEST 失败 → IMPLEMENT
 **目的：** 在安全性和交互效率之间取得平衡，避免每次读取都打断用户，也避免修改和危险命令无确认执行。
 
 - [x] 用 `ToolPolicy.evaluate(phase, tool, args)` 返回 `ALLOW`、`DENY` 或 `CONFIRM`。
-- [ ] `list_files`、`read_file`、`read_file_range`、`search_text`、摘要工具默认 `ALLOW`。
-- [ ] `write_file`、`apply_patch` 默认 `CONFIRM`。
-- [ ] `run_command` 默认 `CONFIRM`；对删除、安装依赖、覆盖文件、网络访问等命令显示更明确的风险提示。
+- [x] `list_files`、`read_file`、`read_file_range`、`search_text`、摘要工具默认 `ALLOW`。
+- [x] `write_file`、`apply_patch` 默认 `CONFIRM`。
+- [x] `run_command` 默认 `CONFIRM`；对删除、安装依赖、覆盖文件、网络访问等命令显示更明确的风险提示。
 - [x] 当前阶段禁止的工具直接 `DENY`，不通过确认绕过。
 - [x] 用户拒绝后把结果反馈给模型，由模型改用其他方案或向用户说明。
 
@@ -165,8 +165,8 @@ TEST 失败 → IMPLEMENT
 - [x] 记录每次工具的名称、规范化参数、结果摘要和产生的进展。
 - [x] 检测相同工具+相同参数的重复调用。
 - [x] 检测连续只读但没有新文件、符号、假设或测试结果的步骤。
-- [/] 检测阶段反复切换、工具单一化和重复最终回答。
-- [/] 将预算拆成 `max_steps`、`max_tool_calls`、`max_read_bytes`、`max_context_tokens`、`max_test_attempts` 和 `max_replan_count`。
+- [x] 检测阶段反复切换、工具单一化和重复最终回答。
+- [x] 将预算拆成 `max_steps`、`max_tool_calls`、`max_read_bytes`、`max_context_tokens`、`max_test_attempts` 和 `max_replan_count`。
 - [x] 达到预算时显示“任务尚未完成，已暂停”，并询问是否继续。
 - [x] `Ctrl-C` 在模型请求、工具执行和确认提示阶段都能终止当前任务并保存会话。
 
@@ -178,13 +178,13 @@ TEST 失败 → IMPLEMENT
 
 **目的：** 禁止 Agent 改完文件就直接宣布完成，保证每个修改任务都有可检查的结果。
 
-- [/] 修改完成后强制进入 `DIFF_CHECK`。
+- [x] 修改完成后强制进入 `DIFF_CHECK`。
 - [x] 显示修改文件、增删行和关键 diff 摘要。
-- [ ] 自动选择并运行项目已有的测试命令；命令不确定时向用户说明。
+- [x] 自动选择并运行项目已有的测试命令；命令不确定时向用户说明。
 - [x] 将测试结果分类为通过、断言失败、编译/语法错误、运行时错误、命令错误和环境错误。
 - [x] 代码错误回到 `IMPLEMENT`；环境问题停止盲目修复并向用户报告。
-- [ ] `VERIFY` 阶段检查任务目标、修改范围和测试结果。
-- [ ] 最终回答必须包含修改文件、验证命令、结果和未解决事项。
+- [x] `VERIFY` 阶段检查任务目标、修改范围和测试结果。
+- [x] 最终回答必须包含修改文件、验证命令、结果和未解决事项。
 
 **完成标准：** 没有 diff 或验证结果时，Controller 不能进入 `DONE`。
 
@@ -209,12 +209,12 @@ TEST 失败 → IMPLEMENT
 
 **目的：** 让用户看到“Agent 正在做什么”，而不是只看到连续的工具调用和大段文件内容。
 
-- [/] 将底层 `ToolEvent` 与面向用户的 `AgentEvent`、Runtime 事件分离。
+- [x] 将底层 `ToolEvent` 与面向用户的 `AgentEvent`、Runtime 事件分离。
 - [x] 默认显示阶段、当前目标、简短进度和失败原因。
 - [x] 工具调用只显示简短目标，如 `read_file: src/service.py:80-130`。
-- [ ] 大型参数和文件内容默认折叠或截断。
-- [/] 统一中文阶段、成功、失败、暂停和确认提示。
-- [ ] 清理模型输出中的伪工具调用协议标记，避免直接打印到终端。
+- [x] 大型参数和文件内容默认折叠或截断。
+- [x] 统一中文阶段、成功、失败、暂停和确认提示。
+- [x] 清理模型输出中的伪工具调用协议标记，避免直接打印到终端。
 
 **完成标准：** 一次真实仓库任务中，用户能看懂探索、计划、修改、测试和验证的阶段变化。
 
@@ -344,6 +344,7 @@ P1 的目的，是让 Agent 在较大的真实仓库中“少读、读对、读�
 | 2026-08-28 | P0.3/P0.6：将实现完成、Diff 检查、测试结果、中断和预算耗尽封装为 Controller 生命周期方法，并补充非法转换测试 | 部分完成 | 待提交 | 相关 pytest：59 passed；`git diff --check` 通过 |
 | 2026-08-28 | P0.5/P0.6：预算耗尽统一经过 Controller 记录并以“任务尚未完成，已暂停”交互提示用户继续 | 部分完成 | 待提交 | 相关 pytest：59 passed；`git diff --check` 通过 |
 | 2026-08-28 | P0.9：补齐 T7/T8，验证测试失败后回到实现、环境错误时暂停并报告 | 已完成 | 待提交 | `pytest -q tests/test_retry_and_verification.py tests/test_agent_workflow.py` 通过 |
+| 2026-08-28 | P0.5/P0.6/P0.8 收口：补齐阶段反复、预算拆分、终态报告、ToolEvent 回调和终端输出清理 | 已完成 | 待提交 | `pytest -q tests/test_agent_workflow.py tests/test_retry_and_verification.py` 通过 |
 
 ## 每次代码修改的固定流程
 

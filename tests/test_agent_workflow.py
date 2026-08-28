@@ -578,6 +578,39 @@ def test_progress_monitor_detects_repeated_final_answer() -> None:
     assert alert.kind == "final_repetition"
 
 
+def test_progress_monitor_detects_phase_monotony() -> None:
+    monitor = ProgressMonitor(phase_monotony_limit=3)
+    assert monitor.record_phase("INSPECTING") is None
+    assert monitor.record_phase("FIXING") is None
+    alert = monitor.record_phase("INSPECTING")
+    assert alert is not None
+    assert alert.kind == "phase_monotony"
+
+
+def test_tool_executor_truncates_large_read_output(tmp_path: Path) -> None:
+    from memcodeagent.tools import ToolExecutor
+    from memcodeagent.workspace import Workspace
+
+    big = "x" * 40000
+    (tmp_path / "large.txt").write_text(big, encoding="utf-8")
+    executor = ToolExecutor(Workspace(tmp_path), dry_run=False, max_read_bytes=2048)
+    obs = executor.execute("read_file", {"path": "large.txt"}, None)
+    assert obs.ok is True
+    assert len(obs.content.encode("utf-8")) < len(big.encode("utf-8"))
+    assert "truncated" in obs.content.lower()
+
+
+def test_completion_report_includes_verification_details(tmp_path: Path) -> None:
+    agent = CodingAgent(AgentConfig(workspace=tmp_path), console=Mock())
+    agent._last_diff_summary = "diff --git a/app.py b/app.py"
+    agent._last_verification_command = "python -m pytest -q"
+    agent._last_verification_kind = VerificationKind.PASS
+    report = agent._build_completion_report()
+    assert "diff --git a/app.py b/app.py" in report
+    assert "python -m pytest -q" in report
+    assert "pass" in report.lower()
+
+
 def test_controller_lifecycle_methods_use_guarded_transitions() -> None:
     controller = AgentController(llm=Mock(), tool_executor=Mock())
     controller.handle_user_request("MODIFY", [{"role": "user", "content": "fix"}])

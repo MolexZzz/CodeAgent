@@ -37,13 +37,18 @@ class ProgressMonitor:
         no_progress_limit: int = 3,
         tool_window: int = 8,
         monotony_limit: int = 6,
+        phase_window: int = 6,
+        phase_monotony_limit: int = 4,
     ) -> None:
         self.duplicate_limit = max(1, duplicate_limit)
         self.no_progress_limit = max(1, no_progress_limit)
         self.tool_window = max(2, tool_window)
         self.monotony_limit = max(2, monotony_limit)
+        self.phase_window = max(2, phase_window)
+        self.phase_monotony_limit = max(2, phase_monotony_limit)
         self._calls: Counter[tuple[str, str]] = Counter()
         self._recent_tools: deque[str] = deque(maxlen=self.tool_window)
+        self._recent_phases: deque[str] = deque(maxlen=self.phase_window)
         self._last_snapshot = ProgressSnapshot()
         self._no_progress_steps = 0
         self._snapshot = ProgressSnapshot()
@@ -98,6 +103,21 @@ class ProgressMonitor:
         self._final_answers.append(normalized)
         return None
 
+    def record_phase(self, phase: str) -> ProgressAlert | None:
+        normalized = str(phase or "").strip().upper()
+        if not normalized:
+            return None
+        self._recent_phases.append(normalized)
+        if (
+            len(self._recent_phases) >= self.phase_monotony_limit
+            and len(set(self._recent_phases)) <= 2
+        ):
+            return ProgressAlert(
+                "phase_monotony",
+                f"最近 {len(self._recent_phases)} 个阶段在少量状态间反复切换；已暂停以避免循环。",
+            )
+        return None
+
     def record_observation(
         self,
         *,
@@ -147,6 +167,7 @@ class ProgressMonitor:
         self._no_progress_steps = 0
         self._snapshot = ProgressSnapshot()
         self._final_answers.clear()
+        self._recent_phases.clear()
 
     def persist_state(self) -> dict[str, Any]:
         return {
@@ -159,6 +180,7 @@ class ProgressMonitor:
             "snapshot": asdict(self._snapshot),
             "no_progress_steps": self._no_progress_steps,
             "final_answers": list(self._final_answers),
+            "recent_phases": list(self._recent_phases),
         }
 
     def restore_state(self, data: dict[str, Any] | None) -> None:
@@ -190,3 +212,6 @@ class ProgressMonitor:
         final_answers = data.get("final_answers")
         if isinstance(final_answers, list):
             self._final_answers = deque((str(item) for item in final_answers), maxlen=3)
+        recent_phases = data.get("recent_phases")
+        if isinstance(recent_phases, list):
+            self._recent_phases = deque((str(item) for item in recent_phases), maxlen=self.phase_window)

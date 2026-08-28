@@ -46,10 +46,17 @@ _AUTO_RETRY_TOOLS = {"run_command"}
 
 
 class ToolExecutor:
-    def __init__(self, workspace: Workspace, dry_run: bool = False, max_tool_retries: int = 2) -> None:
+    def __init__(
+        self,
+        workspace: Workspace,
+        dry_run: bool = False,
+        max_tool_retries: int = 2,
+        max_read_bytes: int = 24000,
+    ) -> None:
         self.workspace = workspace
         self.dry_run = dry_run
         self.max_tool_retries = max_tool_retries
+        self.max_read_bytes = max(1024, max_read_bytes)
 
     def execute(self, tool_name: str | None, args: dict[str, Any], tool_call_id: str | None = None) -> ToolObservation:
         if not tool_name:
@@ -102,11 +109,7 @@ class ToolExecutor:
         end = min(requested_end, start + _DEFAULT_READ_MAX_LINES)
         selected = lines[start:end]
         output = "\n".join(f"{idx + start + 1}: {line}" for idx, line in enumerate(selected))
-        if len(output) > _DEFAULT_READ_MAX_CHARS:
-            output = output[:_DEFAULT_READ_MAX_CHARS] + (
-                f"\n... [truncated at {_DEFAULT_READ_MAX_CHARS} chars; "
-                "use start_line/end_line to read another section]"
-            )
+        output = self._limit_output(output, self.max_read_bytes)
         if end < len(lines):
             output += (
                 f"\n... [showing lines {start + 1}-{end} of {len(lines)}; "
@@ -127,14 +130,9 @@ class ToolExecutor:
                     matches.append(f"{rel}:{line_no}: {line}")
                     if len(matches) >= limit:
                         output = "\n".join(matches)
-                        return output[:_DEFAULT_SEARCH_MAX_CHARS] + (
-                            "\n... [search output truncated; narrow the glob or query]"
-                        ) if len(output) > _DEFAULT_SEARCH_MAX_CHARS else output
+                        return self._limit_output(output, self.max_read_bytes, suffix="\n... [search output truncated; narrow the glob or query]")
         output = "\n".join(matches)
-        if len(output) > _DEFAULT_SEARCH_MAX_CHARS:
-            output = output[:_DEFAULT_SEARCH_MAX_CHARS] + (
-                "\n... [search output truncated; narrow the glob or query]"
-            )
+        output = self._limit_output(output, self.max_read_bytes, suffix="\n... [search output truncated; narrow the glob or query]")
         return output or "(no matches)"
 
     def _tool_diff_summary(self) -> str:
@@ -158,7 +156,10 @@ class ToolExecutor:
         code = stat.returncode or names.returncode
         stdout = self._decode_output(stat.stdout) + "\n" + self._decode_output(names.stdout)
         stderr = self._decode_output(stat.stderr) + self._decode_output(names.stderr)
-        return f"exit_code={code}\nSTDOUT:\n{stdout.strip() or '(no changes)'}\nSTDERR:\n{stderr}"[-6000:]
+        return self._limit_output(
+            f"exit_code={code}\nSTDOUT:\n{stdout.strip() or '(no changes)'}\nSTDERR:\n{stderr}",
+            self.max_read_bytes,
+        )
 
     def _tool_write_file(self, path: str, content: str, overwrite: bool = False) -> str:
         if self.dry_run:
@@ -252,3 +253,11 @@ class ToolExecutor:
             except UnicodeDecodeError:
                 continue
         return raw.decode("utf-8", errors="replace")
+
+    @staticmethod
+    def _limit_output(text: str, max_bytes: int, *, suffix: str = "") -> str:
+        raw = text.encode("utf-8", errors="replace")
+        if len(raw) <= max_bytes:
+            return text
+        kept = raw[:max_bytes].decode("utf-8", errors="ignore")
+        return kept + suffix + f"\n... [truncated at {max_bytes} bytes]"
