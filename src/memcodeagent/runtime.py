@@ -29,6 +29,7 @@ class RuntimeEvent(str, Enum):
     ANSWER_REQUESTED = "answer_requested"
     PLAN_REQUESTED = "plan_requested"
     MODIFY_REQUESTED = "modify_requested"
+    IMPLEMENTATION_STARTED = "implementation_started"
     EXPLORATION_COMPLETE = "exploration_complete"
     PLAN_READY = "plan_ready"
     USER_APPROVED = "user_approved"
@@ -40,6 +41,8 @@ class RuntimeEvent(str, Enum):
     HYPOTHESIS_INVALID = "hypothesis_invalid"
     INTERRUPTED = "interrupted"
     BUDGET_EXHAUSTED = "budget_exhausted"
+    BLOCKED = "blocked"
+    MODIFY_COMPLETED = "modify_completed"
     ANSWER_GENERATED = "answer_generated"
     PLAN_GENERATED = "plan_generated"
 
@@ -56,6 +59,7 @@ class TransitionGuard:
         (Phase.UNDERSTAND, RuntimeEvent.ANSWER_REQUESTED): Phase.ANSWER,
         (Phase.UNDERSTAND, RuntimeEvent.PLAN_REQUESTED): Phase.PLAN_ONLY,
         (Phase.UNDERSTAND, RuntimeEvent.MODIFY_REQUESTED): Phase.UNDERSTAND,
+        (Phase.UNDERSTAND, RuntimeEvent.IMPLEMENTATION_STARTED): Phase.IMPLEMENT,
         (Phase.UNDERSTAND, RuntimeEvent.EXPLORATION_COMPLETE): Phase.PLAN,
         (Phase.PLAN, RuntimeEvent.PLAN_READY): Phase.CONFIRM,
         (Phase.CONFIRM, RuntimeEvent.USER_APPROVED): Phase.IMPLEMENT,
@@ -69,6 +73,7 @@ class TransitionGuard:
         (Phase.PLAN_ONLY, RuntimeEvent.PLAN_GENERATED): Phase.DONE,
         (Phase.VERIFY, RuntimeEvent.ANSWER_GENERATED): Phase.DONE,
         (Phase.VERIFY, RuntimeEvent.TEST_FAILED): Phase.IMPLEMENT,
+        (Phase.VERIFY, RuntimeEvent.MODIFY_COMPLETED): Phase.DONE,
     }
 
     # Interrupts and exhausted budgets are runtime-level exits valid from any
@@ -82,6 +87,7 @@ class TransitionGuard:
     ):
         _TRANSITIONS[(_active_phase, RuntimeEvent.INTERRUPTED)] = Phase.PAUSED
         _TRANSITIONS[(_active_phase, RuntimeEvent.BUDGET_EXHAUSTED)] = Phase.PAUSED
+        _TRANSITIONS[(_active_phase, RuntimeEvent.BLOCKED)] = Phase.PAUSED
 
     @classmethod
     def next_phase(cls, current: Phase, event: RuntimeEvent) -> Phase:

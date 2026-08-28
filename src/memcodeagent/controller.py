@@ -111,11 +111,17 @@ class AgentController:
     def mark_implementation_done(self) -> bool:
         return self.transition(RuntimeEvent.IMPLEMENTATION_DONE)
 
+    def mark_implementation_started(self) -> bool:
+        return self.transition(RuntimeEvent.IMPLEMENTATION_STARTED)
+
     def mark_diff_checked(self) -> bool:
         return self.transition(RuntimeEvent.DIFF_CHECKED)
 
     def mark_test_result(self, passed: bool) -> bool:
         return self.transition(RuntimeEvent.TEST_PASSED if passed else RuntimeEvent.TEST_FAILED)
+
+    def mark_modify_completed(self) -> bool:
+        return self.transition(RuntimeEvent.MODIFY_COMPLETED)
 
     def mark_interrupted(self) -> bool:
         self.interrupted = True
@@ -123,6 +129,10 @@ class AgentController:
 
     def mark_budget_exhausted(self) -> bool:
         return self.transition(RuntimeEvent.BUDGET_EXHAUSTED)
+
+    def mark_blocked(self, reason: str = "") -> bool:
+        self.last_result = reason or self.last_result
+        return self.transition(RuntimeEvent.BLOCKED)
 
     def step(
         self,

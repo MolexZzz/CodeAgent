@@ -6,6 +6,8 @@ from unittest.mock import Mock, patch
 import pytest
 
 from memcodeagent.agent import AgentConfig, CodingAgent
+from memcodeagent.llm import ToolCall
+from memcodeagent.runtime import Phase
 from memcodeagent.tools import ToolExecutor
 from memcodeagent.workspace import Workspace
 
@@ -184,3 +186,128 @@ def test_verification_respects_run_tests_after_edit_flag(tmp_path: Path) -> None
 
     test_msg = [m for m in messages if m.get("content") and "Automated test verification" in m["content"]]
     assert len(test_msg) == 0
+
+
+def test_runtime_recovers_from_failed_tests_then_finishes(tmp_path: Path) -> None:
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_add.py").write_text(
+        "from app import add\n\n"
+        "def test_add():\n"
+        "    assert add(2, 3) == 5\n"
+    )
+    (tmp_path / "app.py").write_text(
+        "def add(a, b):\n"
+        "    return a - b\n"
+    )
+
+    config = AgentConfig(
+        workspace=tmp_path,
+        max_steps=4,
+        run_tests_after_edit=True,
+        approval_required=False,
+    )
+    agent = CodingAgent(config, console=Mock())
+    agent.retriever.retrieve = Mock(return_value=Mock())
+    agent.retriever.remember_task = Mock()
+
+    bad_patch = ToolCall(
+        id="1",
+        name="apply_patch",
+        args={
+            "path": "app.py",
+            "edits": [{"old": "return a - b", "new": "return a + b + 1"}],
+        },
+    )
+    fix_patch = ToolCall(
+        id="2",
+        name="apply_patch",
+        args={
+            "path": "app.py",
+            "edits": [{"old": "return a + b + 1", "new": "return a + b"}],
+        },
+    )
+    decisions = [
+        Mock(
+            is_final=False,
+            assistant_message={"role": "assistant", "content": None},
+            tool_calls=[bad_patch],
+        ),
+        Mock(
+            is_final=False,
+            assistant_message={"role": "assistant", "content": None},
+            tool_calls=[fix_patch],
+        ),
+        Mock(
+            is_final=True,
+            content="修复完成。",
+            assistant_message={"role": "assistant", "content": "修复完成。"},
+            tool_calls=[],
+        ),
+    ]
+
+    with patch.object(agent.llm, "next_action", side_effect=decisions):
+        result = agent._run_loop([
+            {"role": "system", "content": "You are an agent."},
+            {"role": "user", "content": "Fix the add function and verify it."},
+        ], "Fix the add function and verify it.")
+
+    assert result == "修复完成。"
+    assert agent._verification_done is True
+    assert agent._verification_passed is True
+    assert agent.controller.phase == Phase.DONE
+
+
+def test_runtime_blocks_on_verification_environment_error(tmp_path: Path) -> None:
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_add.py").write_text(
+        "from app import add\n\n"
+        "def test_add():\n"
+        "    assert add(2, 3) == 5\n"
+    )
+    (tmp_path / "app.py").write_text(
+        "def add(a, b):\n"
+        "    return a - b\n"
+    )
+
+    config = AgentConfig(
+        workspace=tmp_path,
+        max_steps=2,
+        run_tests_after_edit=True,
+        approval_required=False,
+        test_command='python -c "import definitely_missing_pkg_zz"',
+    )
+    agent = CodingAgent(config, console=Mock())
+    agent.retriever.retrieve = Mock(return_value=Mock())
+    agent.retriever.remember_task = Mock()
+
+    patch_call = ToolCall(
+        id="1",
+        name="apply_patch",
+        args={
+            "path": "app.py",
+            "edits": [{"old": "return a - b", "new": "return a + b"}],
+        },
+    )
+    decisions = [
+        Mock(
+            is_final=False,
+            assistant_message={"role": "assistant", "content": None},
+            tool_calls=[patch_call],
+        ),
+        Mock(
+            is_final=True,
+            content="我已经完成。",
+            assistant_message={"role": "assistant", "content": "我已经完成。"},
+            tool_calls=[],
+        ),
+    ]
+
+    with patch.object(agent.llm, "next_action", side_effect=decisions):
+        result = agent._run_loop([
+            {"role": "system", "content": "You are an agent."},
+            {"role": "user", "content": "Fix the add function and verify it."},
+        ], "Fix the add function and verify it.")
+
+    assert "测试环境或命令错误" in result
+    assert agent._verification_unresolved_error is True
+    assert agent.controller.phase == Phase.PAUSED

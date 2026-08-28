@@ -301,6 +301,58 @@ class CodingAgent:
             self._save_session(messages)
 
     def _run_loop(self, messages: list[dict[str, Any]], task: str) -> str:
+        """Run a single task through the Controller-owned loop."""
+        self.controller.handle_user_request("MODIFY", messages)
+        self.controller.mark_implementation_started()
+        self._stop_requested = False
+        self._phase = "IMPLEMENTING"
+        last_result = ""
+        for _ in range(self.config.max_steps):
+            try:
+                result = self.controller.step(
+                    messages,
+                    tool_context=lambda call: {
+                        "phase": "IMPLEMENTING",
+                        "approval_required": self.config.approval_required,
+                        "protected_test": self._is_protected_test_edit(call.name, call.args),
+                    },
+                )
+            except (RuntimeError, KeyboardInterrupt):
+                self.controller.mark_budget_exhausted()
+                last_result = "任务尚未完成，已暂停。"
+                break
+            self._record_usage(result.decision)
+            last_result = result.decision.content or last_result
+            if result.interrupted:
+                self.controller.mark_interrupted()
+                last_result = "任务已被用户中断。"
+                break
+            changed = any(
+                obs.ok and call.name in _CODE_EDIT_TOOLS
+                for call, obs in zip(result.decision.tool_calls, result.observations)
+            )
+            if changed:
+                self._run_verification_tests(messages)
+                if self._verification_unresolved_error:
+                    self.controller.mark_blocked("verification environment error")
+                    last_result = "测试环境或命令错误，任务已暂停。"
+                    break
+                self.controller.mark_implementation_done()
+                self.controller.mark_diff_checked()
+                self.controller.mark_test_result(self._verification_passed)
+                self.controller.mark_modify_completed()
+            if result.decision.is_final:
+                if self._final_completion_checks(messages):
+                    self.retriever.remember_task(task, last_result)
+                    self._phase = "COMPLETED"
+                    self._save_session(messages)
+                    return last_result
+        self._phase = "PAUSED"
+        self.retriever.remember_task(task, last_result)
+        self._save_session(messages)
+        return last_result or "任务尚未完成，已暂停。"
+
+    def _run_loop_legacy(self, messages: list[dict[str, Any]], task: str) -> str:
         """Core agent loop for single-turn mode: uses per-error retry counter.
 
         When an error occurs (tool failure or test failure), the agent gets up to
@@ -406,8 +458,11 @@ class CodingAgent:
         """
         command = self._resolve_test_command()
         if not command:
-            self._verification_done = False
-            self._verification_passed = False
+            # A repository without a configured/available test command has no
+            # executable verification target; treat this as a deliberate skip,
+            # not as a failing verification that can never be satisfied.
+            self._verification_done = True
+            self._verification_passed = True
             self._last_verification_kind = None
             self._verification_unresolved_error = False
             return False
@@ -754,6 +809,15 @@ class CodingAgent:
                     self._print_phase(phase, step, self.config.max_steps)
                     test_failed = self._run_verification_tests(messages)
                     pending_edits = 0
+                    if self._verification_unresolved_error:
+                        self.controller.mark_blocked("verification environment error")
+                        self._print_agent_event(
+                            AgentEventKind.ALERT,
+                            "测试环境异常",
+                            "命令或依赖错误，已停止继续修改并等待修复环境",
+                        )
+                        self._phase = "PAUSED"
+                        return
                     if test_failed:
                         current_step_has_error = True
                         phase = "FIXING"
@@ -942,13 +1006,19 @@ class CodingAgent:
         usage = getattr(decision, "usage", None)
         if not usage:
             return
-        self.session_prompt_tokens += getattr(usage, "prompt_tokens", 0)
-        self.session_completion_tokens += getattr(usage, "completion_tokens", 0)
-        self.session_total_tokens += getattr(usage, "total_tokens", 0)
+        def number(name: str) -> int:
+            value = getattr(usage, name, 0)
+            return int(value) if isinstance(value, (int, float)) else 0
+        prompt_tokens = number("prompt_tokens")
+        completion_tokens = number("completion_tokens")
+        total_tokens = number("total_tokens")
+        self.session_prompt_tokens += prompt_tokens
+        self.session_completion_tokens += completion_tokens
+        self.session_total_tokens += total_tokens
         self.console.print(
-            f"[dim]Tokens: {getattr(usage, 'total_tokens', 0):,} "
-            f"(prompt: {getattr(usage, 'prompt_tokens', 0):,}, "
-            f"completion: {getattr(usage, 'completion_tokens', 0):,}) | "
+            f"[dim]Tokens: {total_tokens:,} "
+            f"(prompt: {prompt_tokens:,}, "
+            f"completion: {completion_tokens:,}) | "
             f"Session total: {self.session_total_tokens:,}[/dim]"
         )
 
@@ -1401,3 +1471,4 @@ class CodingAgent:
             self.streaming_mode = not self.streaming_mode
         state = "on" if self.streaming_mode else "off"
         self.console.print(f"[cyan]Streaming mode:[/cyan] {state}")
+
