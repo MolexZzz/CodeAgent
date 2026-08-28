@@ -14,6 +14,7 @@ from memcodeagent.llm import AgentDecision
 from memcodeagent.memory.hybrid_retriever import RetrievalContext
 from memcodeagent.policy import PolicyAction, ToolPolicy
 from memcodeagent.progress import ProgressMonitor, ProgressSnapshot
+from memcodeagent.ui import AgentEvent, AgentEventKind, format_agent_event
 from memcodeagent.verification import VerificationKind, classify_verification
 from memcodeagent.runtime import InvalidTransition, Phase, RuntimeEvent, StateMachine, TransitionGuard
 
@@ -51,6 +52,17 @@ def test_transition_guard_rejects_illegal_phase_changes() -> None:
 
     assert TransitionGuard.next_phase(Phase.TEST, RuntimeEvent.TEST_FAILED) == Phase.IMPLEMENT
     assert machine.try_transition(RuntimeEvent.USER_REJECTED) is False
+
+
+def test_controller_records_invalid_transition_errors() -> None:
+    llm = type("FakeLlm", (), {"next_action": lambda self, messages: None})()
+    controller = AgentController(llm=llm, tool_executor=object())
+    controller.state_machine.phase = Phase.PLAN
+
+    ok = controller.transition(RuntimeEvent.USER_APPROVED)
+
+    assert ok is False
+    assert controller.last_transition_error is not None
 
 
 def test_agent_controller_runs_one_tool_turn() -> None:
@@ -135,6 +147,44 @@ def test_tool_policy_permission_matrix() -> None:
         approval_required=False,
         protected_test=True,
     ).action == PolicyAction.DENY
+    assert policy.evaluate(
+        phase="IMPLEMENTING",
+        tool_name="run_command",
+        approval_required=True,
+    ).action == PolicyAction.CONFIRM
+    assert policy.evaluate(
+        phase="INSPECTING",
+        tool_name="read_file_range",
+        approval_required=True,
+    ).action == PolicyAction.ALLOW
+    assert policy.evaluate(
+        phase="INSPECTING",
+        tool_name="summarize_symbols",
+        approval_required=True,
+    ).action == PolicyAction.ALLOW
+    assert policy.evaluate(
+        phase="IMPLEMENTING",
+        tool_name="write_file",
+        approval_required=True,
+    ).action == PolicyAction.CONFIRM
+
+
+def test_tool_targets_are_concise() -> None:
+    assert "src/app.py:10-20" in CodingAgent._tool_target(
+        "read_file",
+        {"path": "src/app.py", "start_line": 10, "end_line": 20},
+    )
+    target = CodingAgent._tool_target(
+        "run_command",
+        {"command": "python -m pytest tests/test_agent_workflow.py -q --tb=short"},
+    )
+    assert target.startswith(" [python -m pytest")
+    assert len(target) < 120
+
+
+def test_agent_event_formatting_is_concise() -> None:
+    event = AgentEvent(AgentEventKind.PHASE, "阶段：检查项目", "步骤 1/4")
+    assert format_agent_event(event) == "阶段：检查项目 — 步骤 1/4"
 
 
 def test_controller_policy_can_deny_without_executing_tool() -> None:
@@ -266,12 +316,61 @@ def test_controller_enforces_tool_call_budget() -> None:
     assert controller.last_progress_alert.kind == "tool_budget"
 
 
+def test_controller_keyboard_interrupt_sets_persisted_flag() -> None:
+    class FakeTools:
+        def execute(self, *_args):
+            raise AssertionError("tool should not run")
+
+    def raising_next_action(_messages):
+        raise KeyboardInterrupt
+
+    llm = type("FakeLlm", (), {"next_action": staticmethod(raising_next_action)})()
+    controller = AgentController(llm=llm, tool_executor=FakeTools())
+    controller.handle_user_request("ANSWER", [{"role": "user", "content": "inspect"}])
+    result = controller.step([{"role": "user", "content": "inspect"}])
+
+    assert result.interrupted is True
+    assert controller.interrupted is True
+    assert controller.persist_state()["interrupted"] is True
+
+
 def test_verification_results_are_classified() -> None:
     assert classify_verification(True, "exit_code=0").kind == VerificationKind.PASS
     assert classify_verification(False, "exit_code=1\nAssertionError: bad").kind == VerificationKind.ASSERTION_FAILURE
     assert classify_verification(False, "exit_code=1\nSyntaxError: invalid syntax").kind == VerificationKind.COMPILE_ERROR
     assert classify_verification(False, "ModuleNotFoundError: openpyxl").kind == VerificationKind.ENVIRONMENT_ERROR
     assert classify_verification(False, "command not found").kind == VerificationKind.COMMAND_ERROR
+
+
+def test_completion_guard_blocks_unresolved_errors() -> None:
+    assert CompletionGuard.can_finish(
+        TaskMode.MODIFY,
+        CompletionState(
+            diff_checked=True,
+            verification_done=True,
+            verification_passed=True,
+            unresolved_errors=True,
+        ),
+    ) is False
+
+
+def test_completion_guard_requires_diff_and_verification() -> None:
+    assert CompletionGuard.can_finish(
+        TaskMode.MODIFY,
+        CompletionState(diff_checked=False, verification_done=True, verification_passed=True),
+    ) is False
+    assert CompletionGuard.can_finish(
+        TaskMode.MODIFY,
+        CompletionState(diff_checked=True, verification_done=False, verification_passed=True),
+    ) is False
+    assert CompletionGuard.can_finish(
+        TaskMode.MODIFY,
+        CompletionState(diff_checked=True, verification_done=True, verification_passed=False),
+    ) is False
+
+
+def test_verification_environment_error_blocks_completion() -> None:
+    assert classify_verification(False, "ModuleNotFoundError: openpyxl").kind == VerificationKind.ENVIRONMENT_ERROR
 
 
 def test_actionable_task_detection() -> None:
@@ -405,6 +504,17 @@ def test_session_state_restores_runtime(tmp_path: Path) -> None:
     assert agent._verification_passed is True
     assert agent._last_verification_kind == VerificationKind.PASS
     assert agent._test_attempts == 2
+
+
+def test_diff_summary_is_cached(tmp_path: Path) -> None:
+    agent = CodingAgent(AgentConfig(workspace=tmp_path), console=Mock())
+    agent.tools.execute = Mock(
+        return_value=Mock(ok=True, content="diff --git a/x b/x", tool_name="diff_summary")
+    )
+    messages = [{"role": "user", "content": "hello"}]
+    agent._print_diff_summary(messages)
+
+    assert agent._last_diff_summary == "diff --git a/x b/x"
 
 
 def test_existing_tests_are_protected(tmp_path: Path) -> None:

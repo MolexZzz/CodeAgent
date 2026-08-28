@@ -21,6 +21,7 @@ from memcodeagent.policy import ToolPolicy
 from memcodeagent.runtime import RuntimeEvent
 from memcodeagent.verification import VerificationKind, classify_verification
 from memcodeagent.tools import ToolExecutor, ToolObservation
+from memcodeagent.ui import AgentEvent, AgentEventKind, format_agent_event
 from memcodeagent.workspace import Workspace
 
 
@@ -170,6 +171,8 @@ class CodingAgent:
         self._verification_passed = False
         self._last_verification_kind: VerificationKind | None = None
         self._test_attempts = 0
+        self._verification_unresolved_error = False
+        self._last_diff_summary = ""
 
     def run(self, task: str) -> str:
         """Single-turn execution: retrieve context, run agent loop, persist memory."""
@@ -406,6 +409,7 @@ class CodingAgent:
             self._verification_done = False
             self._verification_passed = False
             self._last_verification_kind = None
+            self._verification_unresolved_error = False
             return False
         if self._test_attempts >= self.config.max_test_attempts:
             messages.append(
@@ -428,6 +432,10 @@ class CodingAgent:
         self._verification_done = True
         self._verification_passed = passed
         self._last_verification_kind = verification.kind
+        self._verification_unresolved_error = verification.kind in {
+            VerificationKind.ENVIRONMENT_ERROR,
+            VerificationKind.COMMAND_ERROR,
+        }
         status = "PASSED" if verification.passed else "FAILED"
         summary = (
             f"Automated test verification after code edit: {status} "
@@ -548,9 +556,10 @@ class CodingAgent:
                 messages.append(observation.to_message())
                 self._save_session(messages)
 
-        self.console.print(
-            f"[yellow]{mode.value} 模式已达到 {self.config.max_steps} 步预算，任务暂停。"
-            "可以继续提问或把任务改成明确的修改请求。[/yellow]"
+        self._print_agent_event(
+            AgentEventKind.PAUSED,
+            f"{mode.value} 模式已达到 {self.config.max_steps} 步预算",
+            "任务暂停，可继续提问或改成明确的修改请求",
         )
         self._phase = "PAUSED"
         return None
@@ -638,10 +647,20 @@ class CodingAgent:
                     self._phase = "PAUSED"
                     return
 
+                if result.interrupted:
+                    self._print_agent_event(AgentEventKind.PAUSED, "任务已中断", "已保存当前状态")
+                    self._phase = "PAUSED"
+                    self._save_session(messages)
+                    return
+
                 decision = result.decision
                 self._record_usage(decision)
                 if self.context_manager.last_trim_notice:
-                    self.console.print(f"[yellow]{self.context_manager.last_trim_notice}[/yellow]")
+                    self._print_agent_event(
+                        AgentEventKind.ALERT,
+                        "上下文压缩",
+                        self.context_manager.last_trim_notice,
+                    )
 
                 if decision.is_final:
                     if pending_edits:
@@ -661,7 +680,11 @@ class CodingAgent:
                         phase = "FIXING"
                         continue
                     if not self.streaming_mode:
-                        self.console.print(f"[green]{decision.content}[/green]")
+                        self._print_agent_event(
+                            AgentEventKind.DONE,
+                            "任务已完成",
+                            decision.content or "",
+                        )
                     self._phase = "COMPLETED"
                     self._save_session(messages)
                     return
@@ -692,10 +715,14 @@ class CodingAgent:
 
                 if self.controller.last_progress_alert is not None:
                     alert = self.controller.last_progress_alert
-                    self.console.print(f"[yellow]进度监控：{alert.message}[/yellow]")
+                    self._print_agent_event(AgentEventKind.ALERT, "进度监控", alert.message)
                     self.controller.last_progress_alert = None
                     if alert.kind in {"no_progress", "tool_monotony"}:
-                        self.console.print("[yellow]任务因连续无进展而暂停，可继续或调整请求。[/yellow]")
+                        self._print_agent_event(
+                            AgentEventKind.PAUSED,
+                            "任务因连续无进展而暂停",
+                            "可继续或调整请求",
+                        )
                         self._phase = "PAUSED"
                         return
 
@@ -859,19 +886,21 @@ class CodingAgent:
         observation = self.tools.execute("diff_summary", {}, tool_call_id=None)
         if observation.ok and "No git repository found" not in observation.content:
             self.console.print("[dim]  ✓ diff summary[/dim]")
+            self._last_diff_summary = observation.content
             messages.append({"role": "user", "content": f"Final diff summary:\n{observation.content}"})
 
     def _final_completion_checks(self, messages: list[dict[str, Any]]) -> bool:
         diff_obs = self.tools.execute("diff_summary", {}, tool_call_id=None)
         if not diff_obs.ok:
             return False
+        self._last_diff_summary = diff_obs.content
         messages.append({"role": "user", "content": f"Completion diff summary:\n{diff_obs.content}"})
         files_changed = "No changes" not in diff_obs.content and "no changes" not in diff_obs.content
         state = CompletionState(
             diff_checked=True,
             verification_done=self._verification_done,
             verification_passed=self._verification_passed,
-            unresolved_errors=False,
+            unresolved_errors=self._verification_unresolved_error,
             files_changed=files_changed,
         )
         return CompletionGuard.can_finish(TaskMode.MODIFY, state)
@@ -952,10 +981,23 @@ class CodingAgent:
 
     @staticmethod
     def _tool_target(name: str, args: dict[str, Any]) -> str:
-        if name in {"read_file", "list_files", "summarize_tree"}:
+        if name == "read_file":
+            path = args.get("path") or ""
+            start = args.get("start_line")
+            end = args.get("end_line")
+            suffix = f":{start}-{end}" if start or end else ""
+            return f" [{path}{suffix}]"
+        if name in {"list_files", "summarize_tree"}:
             return f" [{args.get('path') or args.get('glob') or ''}]"
         if name == "search_text":
             return f" [{args.get('query', '')}]"
+        if name == "run_command":
+            command = " ".join(str(args.get("command", "")).split())
+            if len(command) > 96:
+                command = command[:93] + "..."
+            return f" [{command}]"
+        if name == "diff_summary":
+            return " [git diff]"
         return ""
 
     @staticmethod
@@ -996,10 +1038,17 @@ class CodingAgent:
 
     def _print_phase(self, phase: str, step: int, limit: int) -> None:
         self._phase = phase
-        self.console.print(
-            f"[cyan]阶段：{_PHASE_LABELS.get(phase, phase)}[/cyan] "
-            f"[dim]步骤 {step}/{limit}[/dim]"
+        event = AgentEvent(
+            AgentEventKind.PHASE,
+            f"阶段：{_PHASE_LABELS.get(phase, phase)}",
+            f"步骤 {step}/{limit}",
         )
+        self.console.print(
+            f"[cyan]{format_agent_event(event)}[/cyan]"
+        )
+
+    def _print_agent_event(self, kind: AgentEventKind, message: str, detail: str = "") -> None:
+        self.console.print(f"[yellow]{format_agent_event(AgentEvent(kind, message, detail))}[/yellow]")
 
     def _requires_approval(self, tool_name: str) -> bool:
         """Require confirmation only for operations that can change state."""
