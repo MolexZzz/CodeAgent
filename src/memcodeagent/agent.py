@@ -31,7 +31,6 @@ class AgentConfig:
     test_command: str | None = None  # None = auto-detect (pytest if a tests/ dir exists)
     approval_required: bool = False
     max_continuations: int = 3
-    acceptance_command: str | None = None
     protect_existing_tests: bool = True
 
 
@@ -44,7 +43,7 @@ _PHASE_LABELS = {
     "IMPLEMENTING": "实现修改",
     "TESTING": "运行验证",
     "FIXING": "修复失败",
-    "VERIFYING": "最终验收",
+    "VERIFYING": "最终检查",
     "COMPLETED": "已完成",
     "PAUSED": "已暂停",
 }
@@ -364,10 +363,7 @@ class CodingAgent:
                         phase = "VERIFYING"
                         self._print_phase(phase, step, self.config.max_steps)
                     if has_changes:
-                        if not self._run_external_acceptance(messages):
-                            self.console.print("[yellow]外部验收未通过，任务不能标记为完成。[/yellow]")
-                            phase = "FIXING"
-                            continue
+                        self._print_diff_summary(messages)
                     if not self._final_completion_checks(messages):
                         self.console.print("[yellow]最终完成条件未满足，任务继续。[/yellow]")
                         phase = "FIXING"
@@ -598,26 +594,6 @@ class CodingAgent:
             return False
         return self._confirm_interactive_plan(messages)
 
-    def _run_external_acceptance(self, messages: list[dict[str, Any]]) -> bool:
-        """Run repository-independent acceptance checks when available."""
-        self._print_diff_summary(messages)
-        if not self.config.acceptance_command:
-            return True
-        command = self.config.acceptance_command.replace("{workspace}", str(self.workspace.root))
-        self.console.print("[dim]运行外部验收命令[/dim]")
-        try:
-            observation = self.tools.execute(
-                "run_command",
-                {"command": command},
-                tool_call_id=None,
-            )
-        except KeyboardInterrupt:
-            self.console.print("[yellow]外部验收已中断。[/yellow]")
-            return False
-        self.console.print(observation.to_display() if self.verbose else f"[dim]  {'✓' if observation.ok else '✗'} external acceptance[/dim]")
-        messages.append({"role": "user", "content": f"External acceptance: {'PASSED' if observation.ok else 'FAILED'}\n{observation.content}"})
-        return observation.ok
-
     def _print_diff_summary(self, messages: list[dict[str, Any]]) -> None:
         observation = self.tools.execute("diff_summary", {}, tool_call_id=None)
         if observation.ok and "No git repository found" not in observation.content:
@@ -625,8 +601,6 @@ class CodingAgent:
             messages.append({"role": "user", "content": f"Final diff summary:\n{observation.content}"})
 
     def _final_completion_checks(self, messages: list[dict[str, Any]]) -> bool:
-        if self.config.acceptance_command:
-            return True
         diff_obs = self.tools.execute("diff_summary", {}, tool_call_id=None)
         if not diff_obs.ok:
             return False

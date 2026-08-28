@@ -55,9 +55,6 @@ mca run "阅读这个项目并总结下一步实现方向"
 # 交互式 REPL
 mca chat
 
-# 带外部验收命令的仓库任务
-mca --acceptance-command "python D:\Coding Agent\scripts\evaluate_ticketdesk.py {workspace}"
-
 # 如确实需要修改已有测试，可关闭基线测试保护
 mca --no-protect-tests
 ```
@@ -118,7 +115,7 @@ export MEMCODE_MODEL="qwen2.5-coder"
 - **原生 LLM 工具调用**：使用 OpenAI function-calling API，支持 6 个工具（list_files、read_file、search_text、write_file、apply_patch、run_command）
 - **自行实现的 agent 循环**：对话管理、工具分发、终止条件、错误处理
 - **本地工具执行**：所有文件/命令操作在本地运行，带工作区路径验证和危险命令拦截
-- **仓库级工作流**：交互模式包含只读探索、计划确认、实现、测试、修复和最终验收阶段
+- **仓库级工作流**：交互模式包含只读探索、计划确认、实现、测试、修复和最终检查阶段
 - **测试保护**：默认保护任务开始前已有的测试文件，避免通过削弱测试制造成功
 - **变更审查**：提供目录摘要和 git diff 摘要工具，帮助控制上下文和最终总结
 - **轻量级记忆**：任务历史持久化到 `.memcode/memory.json`，通过 token 重叠评分检索（无向量数据库）

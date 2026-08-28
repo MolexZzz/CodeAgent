@@ -35,8 +35,3 @@ def test_existing_tests_are_protected(tmp_path: Path) -> None:
     assert agent._is_protected_test_edit("apply_patch", {"path": "tests/test_existing.py"}) is True
     assert agent._is_protected_test_edit("write_file", {"path": "tests/test_existing.py"}) is True
     assert agent._is_protected_test_edit("write_file", {"path": "tests/test_new.py"}) is False
-
-
-def test_acceptance_is_optional_by_default(tmp_path: Path) -> None:
-    agent = CodingAgent(AgentConfig(workspace=tmp_path))
-    assert agent._run_external_acceptance([]) is True

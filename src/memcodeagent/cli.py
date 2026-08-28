@@ -15,7 +15,6 @@ def main(
     workspace: Path = typer.Option(Path.cwd(), "--workspace", "-w", help="Workspace root for the default chat."),
     max_steps: int = typer.Option(8, "--max-steps", help="Maximum steps per continuation budget."),
     approve: bool = typer.Option(True, "--approve/--no-approve", help="Ask before file edits and commands."),
-    acceptance_command: str | None = typer.Option(None, "--acceptance-command", help="Optional final acceptance command. Use {workspace} as a placeholder."),
     protect_tests: bool = typer.Option(True, "--protect-tests/--no-protect-tests", help="Protect tests that existed before the task started."),
 ) -> None:
     """Enter the interactive agent when no subcommand is provided."""
@@ -24,7 +23,6 @@ def main(
             workspace=workspace.resolve(),
             max_steps=max_steps,
             approval_required=approve,
-            acceptance_command=acceptance_command,
             protect_existing_tests=protect_tests,
         )
         agent = CodingAgent(config=config, console=console)
@@ -53,7 +51,6 @@ def chat(
     max_error_retries: int = typer.Option(10, "--max-error-retries", help="Maximum retry attempts per error."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Plan without writing files or running commands."),
     approve: bool = typer.Option(True, "--approve/--no-approve", help="Ask before each tool call."),
-    acceptance_command: str | None = typer.Option(None, "--acceptance-command", help="Optional final acceptance command. Use {workspace} as a placeholder."),
     protect_tests: bool = typer.Option(True, "--protect-tests/--no-protect-tests", help="Protect tests that existed before the task started."),
 ) -> None:
     """Start an interactive chat session with the coding agent."""
@@ -63,7 +60,6 @@ def chat(
         max_error_retries=max_error_retries,
         dry_run=dry_run,
         approval_required=approve,
-        acceptance_command=acceptance_command,
         protect_existing_tests=protect_tests,
     )
     agent = CodingAgent(config=config, console=console)
