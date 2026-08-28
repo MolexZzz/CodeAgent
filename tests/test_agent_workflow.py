@@ -576,3 +576,17 @@ def test_progress_monitor_detects_repeated_final_answer() -> None:
     alert = monitor.record_final_answer("  完成了。 ")
     assert alert is not None
     assert alert.kind == "final_repetition"
+
+
+def test_controller_lifecycle_methods_use_guarded_transitions() -> None:
+    controller = AgentController(llm=Mock(), tool_executor=Mock())
+    controller.handle_user_request("MODIFY", [{"role": "user", "content": "fix"}])
+    assert controller.mark_implementation_done() is False
+    assert controller.last_transition_error
+    controller.state_machine.phase = Phase.IMPLEMENT
+    assert controller.mark_implementation_done() is True
+    assert controller.phase == Phase.DIFF_CHECK
+    assert controller.mark_diff_checked() is True
+    assert controller.phase == Phase.TEST
+    assert controller.mark_test_result(True) is True
+    assert controller.phase == Phase.VERIFY

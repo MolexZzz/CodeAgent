@@ -742,19 +742,19 @@ class CodingAgent:
                     or not any(name in _CODE_EDIT_TOOLS for name in tool_names)
                 )
                 if should_verify:
-                    self.controller.transition(RuntimeEvent.IMPLEMENTATION_DONE)
+                    self.controller.mark_implementation_done()
                     phase = "TESTING"
-                    self.controller.transition(RuntimeEvent.DIFF_CHECKED)
+                    self.controller.mark_diff_checked()
                     self._print_phase(phase, step, self.config.max_steps)
                     test_failed = self._run_verification_tests(messages)
                     pending_edits = 0
                     if test_failed:
                         current_step_has_error = True
                         phase = "FIXING"
-                        self.controller.transition(RuntimeEvent.TEST_FAILED)
+                        self.controller.mark_test_result(False)
                     else:
                         phase = "VERIFYING"
-                        self.controller.transition(RuntimeEvent.TEST_PASSED)
+                        self.controller.mark_test_result(True)
 
                 if current_step_has_error:
                     if last_error_detected:

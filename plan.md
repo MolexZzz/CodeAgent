@@ -341,6 +341,7 @@ P1 的目的，是让 Agent 在较大的真实仓库中“少读、读对、读�
 | 2026-08-28 | 保存/恢复 session runtime 状态：Controller、进度监控和验证状态可持久化 | 部分完成 | 待提交 | `python -m py_compile ...` 通过；相关 pytest：47 passed |
 | 2026-08-28 | P0.8/P0.9 补强：统一 AgentEvent 输出、阶段/工具目标摘要、中断/错误/完成边界回归测试 | 部分完成 | 待提交 | `python -m py_compile ...` 通过；相关 pytest：55 passed |
 | 2026-08-28 | P0.4/P0.8/P0.5：增加危险命令风险分类、独立 ToolEvent（调用/结果）回调、最终回答重复检测 | 部分完成 | 待提交 | 高风险命令明确确认原因；相关 pytest：58 passed |
+| 2026-08-28 | P0.3/P0.6：将实现完成、Diff 检查、测试结果、中断和预算耗尽封装为 Controller 生命周期方法，并补充非法转换测试 | 部分完成 | 待提交 | 相关 pytest：59 passed；`git diff --check` 通过 |
 
 ## 每次代码修改的固定流程
 

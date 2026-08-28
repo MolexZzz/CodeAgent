@@ -71,6 +71,18 @@ class TransitionGuard:
         (Phase.VERIFY, RuntimeEvent.TEST_FAILED): Phase.IMPLEMENT,
     }
 
+    # Interrupts and exhausted budgets are runtime-level exits valid from any
+    # active phase. Keeping them explicit prevents the CLI from inventing
+    # ad-hoc phase mutations when a user presses Ctrl-C or declines to extend
+    # the budget.
+    for _active_phase in (
+        Phase.UNDERSTAND, Phase.PLAN, Phase.CONFIRM, Phase.IMPLEMENT,
+        Phase.DIFF_CHECK, Phase.TEST, Phase.VERIFY, Phase.ANSWER,
+        Phase.PLAN_ONLY,
+    ):
+        _TRANSITIONS[(_active_phase, RuntimeEvent.INTERRUPTED)] = Phase.PAUSED
+        _TRANSITIONS[(_active_phase, RuntimeEvent.BUDGET_EXHAUSTED)] = Phase.PAUSED
+
     @classmethod
     def next_phase(cls, current: Phase, event: RuntimeEvent) -> Phase:
         try:
@@ -97,4 +109,3 @@ class StateMachine:
         except InvalidTransition:
             return False
         return True
-
