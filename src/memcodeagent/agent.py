@@ -292,12 +292,10 @@ class CodingAgent:
         continuation_count = 0
         seen_calls: set[tuple[str, str]] = set()
         phase = "INSPECTING"
+        pending_edits = 0
 
         while True:
             for step in range(1, self.config.max_steps + 1):
-                if step == 1:
-                    phase = "INSPECTING"
-                self._print_phase(phase, step, self.config.max_steps)
                 trimmed = self.context_manager.trim(messages)
                 if self.context_manager.last_trim_notice:
                     self.console.print(f"[yellow]{self.context_manager.last_trim_notice}[/yellow]")
@@ -337,12 +335,24 @@ class CodingAgent:
                 )
 
                 if decision.is_final:
+                    if pending_edits:
+                        self._print_phase("TESTING", step, self.config.max_steps)
+                        self._run_verification_tests(messages)
+                        pending_edits = 0
                     if not self.streaming_mode:
                         self.console.print(f"[green]{decision.content}[/green]")
                     messages.append(decision.assistant_message)
                     return
 
                 # Tool calls: show simplified or detailed view based on verbose flag
+                tool_names = [tc.name for tc in decision.tool_calls]
+                if any(name in _CODE_EDIT_TOOLS for name in tool_names):
+                    phase = "IMPLEMENTING"
+                elif pending_edits and "run_command" in tool_names:
+                    phase = "TESTING"
+                else:
+                    phase = "INSPECTING"
+                self._print_phase(phase, step, self.config.max_steps)
                 if self.verbose:
                     self.console.rule(f"[bold blue]Step {step}")
                     self.console.print(decision.to_display())
@@ -384,10 +394,21 @@ class CodingAgent:
                     if observation.ok and tool_call.name in _CODE_EDIT_TOOLS:
                         code_changed = True
                         phase = "IMPLEMENTING"
+                        pending_edits += 1
 
-                if code_changed:
+                # Validate after a small batch of edits, or when the model has
+                # moved on from editing to another kind of action. This avoids
+                # running the full suite after every single patch while still
+                # feeding failures back before the task drifts too far.
+                should_verify = code_changed and (
+                    pending_edits >= 2
+                    or not any(name in _CODE_EDIT_TOOLS for name in tool_names)
+                )
+                if should_verify:
                     phase = "TESTING"
+                    self._print_phase(phase, step, self.config.max_steps)
                     test_failed = self._run_verification_tests(messages)
+                    pending_edits = 0
                     if test_failed:
                         current_step_has_error = True
                         phase = "FIXING"
