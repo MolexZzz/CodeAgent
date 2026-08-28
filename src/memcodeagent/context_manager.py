@@ -99,8 +99,35 @@ class ContextManager:
 
         # Inject summary between system messages and conversation turns
         if summary_msg:
-            return system_msgs + [summary_msg] + trimmed_rest
-        return system_msgs + trimmed_rest
+            result = system_msgs + [summary_msg] + trimmed_rest
+        else:
+            result = system_msgs + trimmed_rest
+
+        # A single active turn can itself exceed the budget (for example, a
+        # large file read followed by test output), so turn-level trimming
+        # alone is not sufficient. Keep the user request and the newest tool
+        # observations, shortening older tool payloads first.
+        if self._total_tokens(result, []) > self.max_tokens:
+            result = self._fit_oversized_messages(result)
+        return result
+
+    def _fit_oversized_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        budget_chars = max(self.max_tokens * 3, 3000)
+        result = [dict(message) for message in messages]
+        total_chars = sum(len(str(message.get("content") or "")) for message in result)
+        for message in result:
+            if total_chars <= budget_chars:
+                break
+            if message.get("role") != "tool":
+                continue
+            content = str(message.get("content") or "")
+            if len(content) <= 1200:
+                continue
+            keep = max(600, min(1200, len(content) // 4))
+            shortened = content[:keep] + "\n...[older tool output shortened for context budget]"
+            total_chars -= len(content) - len(shortened)
+            message["content"] = shortened
+        return result
 
     def stats(self, messages: list[dict[str, Any]]) -> dict[str, int]:
         """Return counts useful for a /context-style status display."""

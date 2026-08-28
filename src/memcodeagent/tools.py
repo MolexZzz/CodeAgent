@@ -11,6 +11,9 @@ from memcodeagent.workspace import Workspace
 # How much file content to show back to the model when a patch edit fails to
 # match, so it can see why and retry with corrected text.
 _CONTEXT_SNIPPET_CHARS = 800
+_DEFAULT_READ_MAX_LINES = 400
+_DEFAULT_READ_MAX_CHARS = 24000
+_DEFAULT_SEARCH_MAX_CHARS = 16000
 
 
 @dataclass(slots=True)
@@ -80,9 +83,21 @@ class ToolExecutor:
         file_path = self.workspace.resolve_inside(path)
         lines = file_path.read_text(encoding="utf-8", errors="replace").splitlines()
         start = max((start_line or 1) - 1, 0)
-        end = end_line if end_line is not None else len(lines)
+        requested_end = end_line if end_line is not None else start + _DEFAULT_READ_MAX_LINES
+        end = min(requested_end, start + _DEFAULT_READ_MAX_LINES)
         selected = lines[start:end]
-        return "\n".join(f"{idx + start + 1}: {line}" for idx, line in enumerate(selected))
+        output = "\n".join(f"{idx + start + 1}: {line}" for idx, line in enumerate(selected))
+        if len(output) > _DEFAULT_READ_MAX_CHARS:
+            output = output[:_DEFAULT_READ_MAX_CHARS] + (
+                f"\n... [truncated at {_DEFAULT_READ_MAX_CHARS} chars; "
+                "use start_line/end_line to read another section]"
+            )
+        if end < len(lines):
+            output += (
+                f"\n... [showing lines {start + 1}-{end} of {len(lines)}; "
+                "use start_line/end_line to continue]"
+            )
+        return output or "(empty file or requested range)"
 
     def _tool_search_text(self, query: str, glob: str = "**/*", limit: int = 50) -> str:
         matches = []
@@ -96,8 +111,16 @@ class ToolExecutor:
                     rel = path.relative_to(self.workspace.root).as_posix()
                     matches.append(f"{rel}:{line_no}: {line}")
                     if len(matches) >= limit:
-                        return "\n".join(matches)
-        return "\n".join(matches) or "(no matches)"
+                        output = "\n".join(matches)
+                        return output[:_DEFAULT_SEARCH_MAX_CHARS] + (
+                            "\n... [search output truncated; narrow the glob or query]"
+                        ) if len(output) > _DEFAULT_SEARCH_MAX_CHARS else output
+        output = "\n".join(matches)
+        if len(output) > _DEFAULT_SEARCH_MAX_CHARS:
+            output = output[:_DEFAULT_SEARCH_MAX_CHARS] + (
+                "\n... [search output truncated; narrow the glob or query]"
+            )
+        return output or "(no matches)"
 
     def _tool_write_file(self, path: str, content: str, overwrite: bool = False) -> str:
         if self.dry_run:

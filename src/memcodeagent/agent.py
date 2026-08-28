@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,7 @@ class AgentConfig:
     run_tests_after_edit: bool = True
     test_command: str | None = None  # None = auto-detect (pytest if a tests/ dir exists)
     approval_required: bool = False
+    max_continuations: int = 3
 
 
 # Tools that modify code on disk and should trigger a verification test run.
@@ -283,132 +285,132 @@ class CodingAgent:
         """Core agent loop for interactive mode: uses per-error retry counter."""
         error_retry_count = 0
         last_error_detected = False
-        step = 0
-
         self._stop_requested = False
-        step_limit = self.config.max_steps
-        while step < step_limit:
-            step += 1
-            trimmed = self.context_manager.trim(messages)
-            if self.context_manager.last_trim_notice:
-                self.console.print(f"[yellow]{self.context_manager.last_trim_notice}[/yellow]")
+        continuation_count = 0
+        seen_calls: set[tuple[str, str]] = set()
 
-            if self.streaming_mode:
-                # Stream tokens to the terminal as they arrive instead of blocking silently.
-                self.console.print("[green]Streaming:[/green]")
+        while True:
+            for step in range(1, self.config.max_steps + 1):
+                trimmed = self.context_manager.trim(messages)
+                if self.context_manager.last_trim_notice:
+                    self.console.print(f"[yellow]{self.context_manager.last_trim_notice}[/yellow]")
 
-                def _on_chunk(text: str) -> None:
-                    print(text, end="", flush=True)
+                if self.streaming_mode:
+                    self.console.print("[green]Streaming:[/green]")
 
-                try:
-                    decision = self.llm.next_action(trimmed, stream=True, on_chunk=_on_chunk)
-                except KeyboardInterrupt:
-                    self.console.print("[yellow]Interrupted by user.[/yellow]")
-                    return
-                if decision.content:
-                    print()  # newline after streamed content
-            else:
-                # Show spinner during LLM call
-                with Status("[cyan]Thinking...[/cyan]", console=self.console):
+                    def _on_chunk(text: str) -> None:
+                        print(text, end="", flush=True)
+
                     try:
-                        decision = self.llm.next_action(trimmed)
+                        decision = self.llm.next_action(trimmed, stream=True, on_chunk=_on_chunk)
                     except KeyboardInterrupt:
                         self.console.print("[yellow]Interrupted by user.[/yellow]")
                         return
-
-            # Update session token counters
-            self.session_prompt_tokens += decision.usage.prompt_tokens
-            self.session_completion_tokens += decision.usage.completion_tokens
-            self.session_total_tokens += decision.usage.total_tokens
-
-            # Display token usage
-            self.console.print(
-                f"[dim]Tokens: {decision.usage.total_tokens:,} "
-                f"(prompt: {decision.usage.prompt_tokens:,}, "
-                f"completion: {decision.usage.completion_tokens:,}) | "
-                f"Session total: {self.session_total_tokens:,}[/dim]"
-            )
-
-            if decision.is_final:
-                # In interactive mode, just print and return; memory is built across the full session.
-                if not self.streaming_mode:
-                    self.console.print(f"[green]{decision.content}[/green]")
-                messages.append(decision.assistant_message)
-                return
-
-            # Tool calls: show simplified or detailed view based on verbose flag
-            if self.verbose:
-                self.console.rule(f"[bold blue]Step {step}")
-                self.console.print(decision.to_display())
-            else:
-                tool_names = [tc.name for tc in decision.tool_calls]
-                self.console.print(f"[dim]→ calling {', '.join(tool_names)}...[/dim]")
-
-            messages.append(decision.assistant_message)
-            self._save_session(messages)
-
-            # Execute all tool calls and collect observations.
-            code_changed = False
-            current_step_has_error = False
-
-            for tool_call in decision.tool_calls:
-                if self._requires_approval(tool_call.name) and not self._confirm_tool(tool_call.name, tool_call.args):
-                    observation = ToolObservation(tool_call.name, False, "Tool call denied by user.", tool_call.id)
+                    if decision.content:
+                        print()
                 else:
-                    try:
-                        observation = self.tools.execute(tool_call.name, tool_call.args, tool_call.id)
-                    except KeyboardInterrupt:
-                        self.console.print("[yellow]Interrupted during tool execution.[/yellow]")
-                        return
+                    with Status("[cyan]Thinking...[/cyan]", console=self.console):
+                        try:
+                            decision = self.llm.next_action(trimmed)
+                        except KeyboardInterrupt:
+                            self.console.print("[yellow]Interrupted by user.[/yellow]")
+                            return
+
+                # Update session token counters
+                self.session_prompt_tokens += decision.usage.prompt_tokens
+                self.session_completion_tokens += decision.usage.completion_tokens
+                self.session_total_tokens += decision.usage.total_tokens
+
+                # Display token usage
+                self.console.print(
+                    f"[dim]Tokens: {decision.usage.total_tokens:,} "
+                    f"(prompt: {decision.usage.prompt_tokens:,}, "
+                    f"completion: {decision.usage.completion_tokens:,}) | "
+                    f"Session total: {self.session_total_tokens:,}[/dim]"
+                )
+
+                if decision.is_final:
+                    if not self.streaming_mode:
+                        self.console.print(f"[green]{decision.content}[/green]")
+                    messages.append(decision.assistant_message)
+                    return
+
+                # Tool calls: show simplified or detailed view based on verbose flag
                 if self.verbose:
-                    self.console.print(observation.to_display())
+                    self.console.rule(f"[bold blue]Step {step}")
+                    self.console.print(decision.to_display())
                 else:
-                    status_icon = "✓" if observation.ok else "✗"
-                    self.console.print(f"[dim]  {status_icon} {observation.tool_name}[/dim]")
-                messages.append(observation.to_message())
+                    tool_names = [tc.name for tc in decision.tool_calls]
+                    self.console.print(f"[dim]→ calling {', '.join(tool_names)}...[/dim]")
+
+                messages.append(decision.assistant_message)
                 self._save_session(messages)
 
-                if not observation.ok:
-                    current_step_has_error = True
+                code_changed = False
+                current_step_has_error = False
 
-                if observation.ok and tool_call.name in _CODE_EDIT_TOOLS:
-                    code_changed = True
+                for tool_call in decision.tool_calls:
+                    call_key = (tool_call.name, json.dumps(tool_call.args, sort_keys=True, ensure_ascii=False))
+                    if call_key in seen_calls:
+                        observation = ToolObservation(tool_call.name, False, "Duplicate tool call suppressed; use a different path, range, query, or command.", tool_call.id)
+                    elif self._requires_approval(tool_call.name) and not self._confirm_tool(tool_call.name, tool_call.args):
+                        seen_calls.add(call_key)
+                        observation = ToolObservation(tool_call.name, False, "Tool call denied by user.", tool_call.id)
+                    else:
+                        seen_calls.add(call_key)
+                        try:
+                            observation = self.tools.execute(tool_call.name, tool_call.args, tool_call.id)
+                        except KeyboardInterrupt:
+                            self.console.print("[yellow]Interrupted during tool execution.[/yellow]")
+                            return
+                    if self.verbose:
+                        self.console.print(observation.to_display())
+                    else:
+                        status_icon = "✓" if observation.ok else "✗"
+                        self.console.print(f"[dim]  {status_icon} {observation.tool_name}[/dim]")
+                    messages.append(observation.to_message())
+                    self._save_session(messages)
 
-            # Run verification tests after code changes
-            if code_changed:
-                test_failed = self._run_verification_tests(messages)
-                if test_failed:
-                    current_step_has_error = True
+                    if not observation.ok:
+                        current_step_has_error = True
 
-            # Update error retry counter based on current step outcome
-            if current_step_has_error:
-                if last_error_detected:
-                    # Still in error state, increment retry count
-                    error_retry_count += 1
+                    if observation.ok and tool_call.name in _CODE_EDIT_TOOLS:
+                        code_changed = True
+
+                if code_changed:
+                    test_failed = self._run_verification_tests(messages)
+                    if test_failed:
+                        current_step_has_error = True
+
+                if current_step_has_error:
+                    if last_error_detected:
+                        error_retry_count += 1
+                    else:
+                        error_retry_count = 1
+                        last_error_detected = True
+
+                    if error_retry_count >= self.config.max_error_retries:
+                        self.console.print(f"[yellow]Stopped after {error_retry_count} failed attempts to fix the error.[/yellow]")
+                        return
                 else:
-                    # New error detected, reset counter to 1
-                    error_retry_count = 1
-                    last_error_detected = True
+                    if last_error_detected:
+                        self.console.print(f"[green]✓ Error fixed after {error_retry_count} attempt(s). Counter reset.[/green]")
+                        error_retry_count = 0
+                        last_error_detected = False
 
-                if error_retry_count >= self.config.max_error_retries:
-                    self.console.print(f"[yellow]Stopped after {error_retry_count} failed attempts to fix the error.[/yellow]")
-                    return
-            else:
-                # No error in this step - reset counter if we were in error state
-                if last_error_detected:
-                    self.console.print(f"[green]✓ Error fixed after {error_retry_count} attempt(s). Counter reset.[/green]")
-                    error_retry_count = 0
-                    last_error_detected = False
-        self.console.print(f"[yellow]Paused after {step} agent steps ({self.config.max_steps}-step budget reached).[/yellow]")
-        try:
-            continue_work = questionary.confirm("Task may be incomplete. Continue for another step budget?", default=False).ask()
-        except (KeyboardInterrupt, EOFError):
-            continue_work = False
-        if continue_work:
-            self.console.print("[cyan]Continuing with a new step budget...[/cyan]")
-            self._run_loop_interactive(messages)
-        else:
-            self.console.print("[dim]Task paused. No further tools will be executed.[/dim]")
+            self.console.print(f"[yellow]Paused after {step} agent steps ({self.config.max_steps}-step budget reached).[/yellow]")
+            if continuation_count >= self.config.max_continuations:
+                self.console.print("[dim]Continuation limit reached. Task paused; start a new message to continue.[/dim]")
+                return
+            try:
+                continue_work = questionary.confirm("Task may be incomplete. Continue with another step budget?", default=False).ask()
+            except (KeyboardInterrupt, EOFError):
+                continue_work = False
+            if not continue_work:
+                self.console.print("[dim]Task paused. No further tools will be executed.[/dim]")
+                return
+            continuation_count += 1
+            self.console.print(f"[cyan]Continuing with budget {continuation_count}/{self.config.max_continuations}...[/cyan]")
 
     def _requires_approval(self, tool_name: str) -> bool:
         """Require confirmation only for operations that can change state."""
@@ -490,8 +492,12 @@ class CodingAgent:
                 "content": (
                     "You are MemCodeAgent, a CLI coding agent. Use the provided tools to complete "
                     "programming tasks: list_files, read_file, search_text, write_file, apply_patch, "
-                    "run_command. You may call multiple tools in parallel. Observe each result and "
-                    "continue until the task is complete, then respond with a final natural-language answer."
+                    f"run_command. The workspace root is {self.workspace.root}. Tools already execute "
+                    "inside this directory; never add `cd /workspace`, `/e/workspace`, or switch to "
+                    "another project. Use relative paths. Before the first tool call, briefly state a "
+                    "3-5 step plan in your assistant content. Inspect only files relevant to the task, "
+                    "use line ranges for large files, avoid repeating an identical tool call, and "
+                    "finish with verification and a concise summary."
                 ),
             },
             {
@@ -507,8 +513,12 @@ class CodingAgent:
                 "content": (
                     "You are MemCodeAgent, a CLI coding agent. Use the provided tools to complete "
                     "programming tasks: list_files, read_file, search_text, write_file, apply_patch, "
-                    "run_command. You may call multiple tools in parallel. Observe each result and "
-                    "continue until the task is complete, then respond with a final natural-language answer. "
+                    f"run_command. The workspace root is {self.workspace.root}. Tools already execute "
+                    "inside this directory; never add `cd /workspace`, `/e/workspace`, or switch to "
+                    "another project. Use relative paths. Before the first tool call, briefly state a "
+                    "3-5 step plan in your assistant content. Inspect only files relevant to the task, "
+                    "use line ranges for large files, avoid repeating an identical tool call, and "
+                    "finish with verification and a concise summary. "
                     "You are in an interactive chat session, so the user may ask follow-up questions or "
                     "refine their requests across multiple turns."
                 ),

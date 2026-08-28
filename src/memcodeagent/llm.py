@@ -32,7 +32,10 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Read a text file inside the workspace, optionally a line range, with line numbers.",
+            "description": (
+                "Read a bounded section of a text file inside the workspace, with line numbers. "
+                "Defaults to at most 400 lines; use start_line/end_line for large files."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -116,7 +119,10 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "run_command",
-            "description": "Run a shell command inside the workspace and return exit code, stdout, and stderr.",
+            "description": (
+                "Run a shell command with the workspace root as the current directory. "
+                "Do not add `cd /workspace` or change to another project; use relative paths."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
