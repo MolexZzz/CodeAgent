@@ -19,6 +19,7 @@ from memcodeagent.llm import LlmClient
 from memcodeagent.memory.hybrid_retriever import HybridRetriever, RetrievalContext
 from memcodeagent.policy import ToolPolicy
 from memcodeagent.runtime import RuntimeEvent
+from memcodeagent.verification import VerificationKind, classify_verification
 from memcodeagent.tools import ToolExecutor, ToolObservation
 from memcodeagent.workspace import Workspace
 
@@ -165,6 +166,7 @@ class CodingAgent:
         self._protected_test_files: set[str] = set()
         self._verification_done = False
         self._verification_passed = False
+        self._last_verification_kind: VerificationKind | None = None
 
     def run(self, task: str) -> str:
         """Single-turn execution: retrieve context, run agent loop, persist memory."""
@@ -400,16 +402,20 @@ class CodingAgent:
         if not command:
             self._verification_done = False
             self._verification_passed = False
+            self._last_verification_kind = None
             return False
         self.console.rule("[bold magenta]Verification tests")
         observation = self.tools.execute("run_command", {"command": command}, tool_call_id=None)
         self.console.print(observation.to_display())
-        passed = observation.ok and "exit_code=0" in observation.content
+        verification = classify_verification(observation.ok, observation.content)
+        passed = verification.passed
         self._verification_done = True
         self._verification_passed = passed
-        status = "PASSED" if passed else "FAILED"
+        self._last_verification_kind = verification.kind
+        status = "PASSED" if verification.passed else "FAILED"
         summary = (
-            f"Automated test verification after code edit: {status}.\n"
+            f"Automated test verification after code edit: {status} "
+            f"[{verification.kind.value}] ({verification.summary}).\n"
             f"{self._summarize_test_output(observation.content)}"
         )
         messages.append({"role": "user", "content": summary})

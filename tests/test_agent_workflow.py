@@ -14,6 +14,7 @@ from memcodeagent.llm import AgentDecision
 from memcodeagent.memory.hybrid_retriever import RetrievalContext
 from memcodeagent.policy import PolicyAction, ToolPolicy
 from memcodeagent.progress import ProgressMonitor, ProgressSnapshot
+from memcodeagent.verification import VerificationKind, classify_verification
 from memcodeagent.runtime import InvalidTransition, Phase, RuntimeEvent, StateMachine, TransitionGuard
 
 
@@ -238,6 +239,14 @@ def test_progress_monitor_detects_no_progress() -> None:
     alert = monitor.record_snapshot(snapshot)
     assert alert is not None
     assert alert.kind == "no_progress"
+
+
+def test_verification_results_are_classified() -> None:
+    assert classify_verification(True, "exit_code=0").kind == VerificationKind.PASS
+    assert classify_verification(False, "exit_code=1\nAssertionError: bad").kind == VerificationKind.ASSERTION_FAILURE
+    assert classify_verification(False, "exit_code=1\nSyntaxError: invalid syntax").kind == VerificationKind.COMPILE_ERROR
+    assert classify_verification(False, "ModuleNotFoundError: openpyxl").kind == VerificationKind.ENVIRONMENT_ERROR
+    assert classify_verification(False, "command not found").kind == VerificationKind.COMMAND_ERROR
 
 
 def test_actionable_task_detection() -> None:
