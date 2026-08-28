@@ -384,6 +384,29 @@ def test_session_state_defaults(tmp_path: Path) -> None:
     assert agent._plan_text == ""
 
 
+def test_session_state_restores_runtime(tmp_path: Path) -> None:
+    agent = CodingAgent(AgentConfig(workspace=tmp_path))
+    agent.controller.handle_user_request("MODIFY", [{"role": "user", "content": "fix"}])
+    agent.controller.step_count = 3
+    agent.controller.tool_calls.append(("read_file", {"path": "a.py"}))
+    agent._verification_done = True
+    agent._verification_passed = True
+    agent._last_verification_kind = VerificationKind.PASS
+    agent._test_attempts = 2
+    messages = [{"role": "user", "content": "hello"}]
+    agent._save_session(messages)
+
+    restored = agent._load_session()
+
+    assert restored is not None
+    assert agent.controller.step_count == 3
+    assert agent.controller.tool_calls == [("read_file", {"path": "a.py"})]
+    assert agent._verification_done is True
+    assert agent._verification_passed is True
+    assert agent._last_verification_kind == VerificationKind.PASS
+    assert agent._test_attempts == 2
+
+
 def test_existing_tests_are_protected(tmp_path: Path) -> None:
     tests_dir = tmp_path / "tests"
     tests_dir.mkdir()

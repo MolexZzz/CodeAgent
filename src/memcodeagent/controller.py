@@ -262,4 +262,48 @@ class AgentController:
             ],
             "last_result": self.last_result,
             "interrupted": self.interrupted,
+            "last_transition_error": self.last_transition_error,
+            "last_progress_alert": (
+                None
+                if self.last_progress_alert is None
+                else {
+                    "kind": getattr(self.last_progress_alert, "kind", ""),
+                    "message": getattr(self.last_progress_alert, "message", ""),
+                    "severity": getattr(self.last_progress_alert, "severity", ""),
+                }
+            ),
+            "progress": self.progress_monitor.persist_state(),
         }
+
+    def restore_state(self, data: dict[str, Any] | None) -> None:
+        """Best-effort restore of persisted controller state."""
+        if not isinstance(data, dict):
+            return
+        self.task_mode = data.get("task_mode") or self.task_mode
+        phase_name = data.get("phase")
+        if phase_name:
+            try:
+                self.state_machine.phase = Phase(str(phase_name))
+            except ValueError:
+                try:
+                    self.state_machine.phase = Phase[str(phase_name)]
+                except KeyError:
+                    pass
+        self.step_count = int(data.get("step_count", self.step_count))
+        self.max_tool_calls = int(data.get("max_tool_calls", self.max_tool_calls))
+        tool_calls = data.get("tool_calls")
+        if isinstance(tool_calls, list):
+            self.tool_calls = []
+            for item in tool_calls:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name", ""))
+                args = item.get("args")
+                if isinstance(args, dict) and name:
+                    self.tool_calls.append((name, args))
+        self.last_result = data.get("last_result", self.last_result)
+        self.interrupted = bool(data.get("interrupted", self.interrupted))
+        self.last_transition_error = data.get("last_transition_error")
+        progress_state = data.get("progress")
+        if isinstance(progress_state, dict):
+            self.progress_monitor.restore_state(progress_state)

@@ -337,7 +337,8 @@ P1 的目的，是让 Agent 在较大的真实仓库中“少读、读对、读�
 | 2026-08-28 | 完成 P0.5 初版：重复调用、无进展、工具单一化监控和续行预算重置 | 部分完成 | `8963d16` | 相关 pytest：44 passed |
 | 2026-08-28 | 重新审计 P0 状态，撤回对未完成项的过度标记 | 已完成 | 待提交 | 已逐项对照代码和测试 |
 | 2026-08-28 | P0.6 第一小步：增加结构化验证结果分类，并保持旧版 PASSED/FAILED 消息兼容 | 部分完成 | 待提交 | `python -m py_compile ...` 通过；相关 pytest：45 passed |
-| 2026-08-28 | P0.5/P0.6 第二小步：加入 `max_tool_calls`、`max_test_attempts`，并将 diff/test 事件接入 Controller | 部分完成 | 待提交 | `python -m py_compile ...` 通过；相关 pytest：46 passed |
+| 2026-08-28 | P0.5/P0.6 第二小步：加入 `max_tool_calls`、`max_test_attempts`，并将 diff/test 事件接入 Controller | 部分完成 | `7980052` | 相关 pytest：46 passed |
+| 2026-08-28 | 保存/恢复 session runtime 状态：Controller、进度监控和验证状态可持久化 | 部分完成 | 待提交 | `python -m py_compile ...` 通过；相关 pytest：47 passed |
 
 ## 每次代码修改的固定流程
 

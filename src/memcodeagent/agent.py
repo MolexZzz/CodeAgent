@@ -1052,7 +1052,18 @@ class CodingAgent:
         self._session_path.parent.mkdir(parents=True, exist_ok=True)
         self._session_path.write_text(
             json.dumps(
-                {"messages": messages, "phase": self._phase, "plan": self._plan_text},
+                {
+                    "messages": messages,
+                    "phase": self._phase,
+                    "plan": self._plan_text,
+                    "controller": self.controller.persist_state(),
+                    "verification": {
+                        "done": self._verification_done,
+                        "passed": self._verification_passed,
+                        "kind": None if self._last_verification_kind is None else self._last_verification_kind.value,
+                        "attempts": self._test_attempts,
+                    },
+                },
                 ensure_ascii=False,
                 indent=2,
             ),
@@ -1066,9 +1077,27 @@ class CodingAgent:
             messages = data.get("messages")
             self._phase = data.get("phase", "IDLE")
             self._plan_text = data.get("plan", "")
+            self._restore_runtime_state(data)
             return messages if isinstance(messages, list) and messages else None
         except (OSError, json.JSONDecodeError):
             return None
+
+    def _restore_runtime_state(self, data: dict[str, Any]) -> None:
+        controller_state = data.get("controller")
+        if isinstance(controller_state, dict):
+            self.controller.restore_state(controller_state)
+        verification = data.get("verification")
+        if isinstance(verification, dict):
+            self._verification_done = bool(verification.get("done", False))
+            self._verification_passed = bool(verification.get("passed", False))
+            kind = verification.get("kind")
+            try:
+                self._last_verification_kind = (
+                    None if kind is None else VerificationKind(str(kind))
+                )
+            except ValueError:
+                self._last_verification_kind = None
+            self._test_attempts = int(verification.get("attempts", 0))
 
     def _print_cache_stats(self, messages: list[dict[str, Any]]) -> None:
         stats = self.context_manager.stats(messages)

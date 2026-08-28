@@ -144,3 +144,30 @@ class ProgressMonitor:
             "snapshot": asdict(self._snapshot),
             "no_progress_steps": self._no_progress_steps,
         }
+
+    def restore_state(self, data: dict[str, Any] | None) -> None:
+        if not isinstance(data, dict):
+            return
+        snapshot = data.get("snapshot")
+        if isinstance(snapshot, dict):
+            self._snapshot = ProgressSnapshot(**{k: int(v) for k, v in snapshot.items() if k in ProgressSnapshot.__annotations__})
+        last_snapshot = data.get("last_snapshot")
+        if isinstance(last_snapshot, dict):
+            self._last_snapshot = ProgressSnapshot(**{k: int(v) for k, v in last_snapshot.items() if k in ProgressSnapshot.__annotations__})
+        recent = data.get("recent_tools")
+        if isinstance(recent, list):
+            self._recent_tools = deque((str(item) for item in recent), maxlen=self.tool_window)
+        calls = data.get("calls")
+        if isinstance(calls, list):
+            self._calls.clear()
+            for item in calls:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name", ""))
+                args = item.get("args")
+                if not isinstance(args, dict):
+                    args = {}
+                count = int(item.get("count", 0))
+                if name:
+                    self._calls[(name, json.dumps(args, sort_keys=True, ensure_ascii=False))] = count
+        self._no_progress_steps = int(data.get("no_progress_steps", 0))
