@@ -38,6 +38,8 @@ class AgentConfig:
     approval_required: bool = False
     max_continuations: int = 3
     protect_existing_tests: bool = True
+    max_tool_calls: int = 64
+    max_test_attempts: int = 5
 
 
 class TaskMode(str, Enum):
@@ -167,6 +169,7 @@ class CodingAgent:
         self._verification_done = False
         self._verification_passed = False
         self._last_verification_kind: VerificationKind | None = None
+        self._test_attempts = 0
 
     def run(self, task: str) -> str:
         """Single-turn execution: retrieve context, run agent loop, persist memory."""
@@ -404,6 +407,19 @@ class CodingAgent:
             self._verification_passed = False
             self._last_verification_kind = None
             return False
+        if self._test_attempts >= self.config.max_test_attempts:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "Automated test verification: TEST_ATTEMPT_BUDGET_EXHAUSTED. "
+                        f"已达到最大测试尝试次数 {self.config.max_test_attempts}。"
+                    ),
+                }
+            )
+            self._last_verification_kind = VerificationKind.COMMAND_ERROR
+            return True
+        self._test_attempts += 1
         self.console.rule("[bold magenta]Verification tests")
         observation = self.tools.execute("run_command", {"command": command}, tool_call_id=None)
         self.console.print(observation.to_display())
@@ -692,15 +708,19 @@ class CodingAgent:
                     or not any(name in _CODE_EDIT_TOOLS for name in tool_names)
                 )
                 if should_verify:
+                    self.controller.transition(RuntimeEvent.IMPLEMENTATION_DONE)
                     phase = "TESTING"
+                    self.controller.transition(RuntimeEvent.DIFF_CHECKED)
                     self._print_phase(phase, step, self.config.max_steps)
                     test_failed = self._run_verification_tests(messages)
                     pending_edits = 0
                     if test_failed:
                         current_step_has_error = True
                         phase = "FIXING"
+                        self.controller.transition(RuntimeEvent.TEST_FAILED)
                     else:
                         phase = "VERIFYING"
+                        self.controller.transition(RuntimeEvent.TEST_PASSED)
 
                 if current_step_has_error:
                     if last_error_detected:

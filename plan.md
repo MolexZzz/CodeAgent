@@ -166,7 +166,7 @@ TEST 失败 → IMPLEMENT
 - [x] 检测相同工具+相同参数的重复调用。
 - [x] 检测连续只读但没有新文件、符号、假设或测试结果的步骤。
 - [/] 检测阶段反复切换、工具单一化和重复最终回答。
-- [ ] 将预算拆成 `max_steps`、`max_tool_calls`、`max_read_bytes`、`max_context_tokens`、`max_test_attempts` 和 `max_replan_count`。
+- [/] 将预算拆成 `max_steps`、`max_tool_calls`、`max_read_bytes`、`max_context_tokens`、`max_test_attempts` 和 `max_replan_count`。
 - [x] 达到预算时显示“任务尚未完成，已暂停”，并询问是否继续。
 - [/] `Ctrl-C` 在模型请求、工具执行和确认提示阶段都能终止当前任务并保存会话。
 
@@ -178,11 +178,11 @@ TEST 失败 → IMPLEMENT
 
 **目的：** 禁止 Agent 改完文件就直接宣布完成，保证每个修改任务都有可检查的结果。
 
-- [ ] 修改完成后强制进入 `DIFF_CHECK`。
+- [/] 修改完成后强制进入 `DIFF_CHECK`。
 - [ ] 显示修改文件、增删行和关键 diff 摘要。
 - [ ] 自动选择并运行项目已有的测试命令；命令不确定时向用户说明。
 - [x] 将测试结果分类为通过、断言失败、编译/语法错误、运行时错误、命令错误和环境错误。
-- [ ] 代码错误回到 `IMPLEMENT`；环境问题停止盲目修复并向用户报告。
+- [/] 代码错误回到 `IMPLEMENT`；环境问题停止盲目修复并向用户报告。
 - [ ] `VERIFY` 阶段检查任务目标、修改范围和测试结果。
 - [ ] 最终回答必须包含修改文件、验证命令、结果和未解决事项。
 
@@ -337,6 +337,7 @@ P1 的目的，是让 Agent 在较大的真实仓库中“少读、读对、读�
 | 2026-08-28 | 完成 P0.5 初版：重复调用、无进展、工具单一化监控和续行预算重置 | 部分完成 | `8963d16` | 相关 pytest：44 passed |
 | 2026-08-28 | 重新审计 P0 状态，撤回对未完成项的过度标记 | 已完成 | 待提交 | 已逐项对照代码和测试 |
 | 2026-08-28 | P0.6 第一小步：增加结构化验证结果分类，并保持旧版 PASSED/FAILED 消息兼容 | 部分完成 | 待提交 | `python -m py_compile ...` 通过；相关 pytest：45 passed |
+| 2026-08-28 | P0.5/P0.6 第二小步：加入 `max_tool_calls`、`max_test_attempts`，并将 diff/test 事件接入 Controller | 部分完成 | 待提交 | `python -m py_compile ...` 通过；相关 pytest：46 passed |
 
 ## 每次代码修改的固定流程
 

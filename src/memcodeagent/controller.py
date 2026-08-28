@@ -14,7 +14,7 @@ from typing import Any
 
 from memcodeagent.llm import AgentDecision
 from memcodeagent.policy import PolicyAction, ToolPolicy
-from memcodeagent.progress import ProgressMonitor
+from memcodeagent.progress import ProgressAlert, ProgressMonitor
 from memcodeagent.runtime import Phase, RuntimeEvent, StateMachine
 from memcodeagent.tools import ToolObservation
 
@@ -43,6 +43,7 @@ class AgentController:
         tool_executor: Any,
         context_manager: Any | None = None,
         max_steps: int = 8,
+        max_tool_calls: int = 64,
         tool_policy: ToolPolicy | None = None,
         confirmation_callback: Callable[[Any], bool] | None = None,
         progress_monitor: ProgressMonitor | None = None,
@@ -51,6 +52,7 @@ class AgentController:
         self.tool_executor = tool_executor
         self.context_manager = context_manager
         self.max_steps = max(1, max_steps)
+        self.max_tool_calls = max(1, max_tool_calls)
         self.tool_policy = tool_policy
         self.confirmation_callback = confirmation_callback
         self.progress_monitor = progress_monitor or ProgressMonitor()
@@ -160,6 +162,20 @@ class AgentController:
 
         observations: list[Any] = []
         for tool_call in decision.tool_calls:
+            if len(self.tool_calls) >= self.max_tool_calls:
+                observation = ToolObservation(
+                    tool_call.name,
+                    False,
+                    f"已达到工具调用预算 {self.max_tool_calls}，任务暂停。",
+                    tool_call.id,
+                )
+                observations.append(observation)
+                messages.append(observation.to_message())
+                self.last_progress_alert = ProgressAlert(
+                    "tool_budget",
+                    f"已达到工具调用预算 {self.max_tool_calls}。",
+                )
+                continue
             self.tool_calls.append((tool_call.name, dict(tool_call.args)))
             observation = None
             alert = self.progress_monitor.record_tool(tool_call.name, tool_call.args)
@@ -240,6 +256,7 @@ class AgentController:
             "task_mode": self.task_mode,
             "phase": self.phase.value,
             "step_count": self.step_count,
+            "max_tool_calls": self.max_tool_calls,
             "tool_calls": [
                 {"name": name, "args": args} for name, args in self.tool_calls
             ],

@@ -241,6 +241,31 @@ def test_progress_monitor_detects_no_progress() -> None:
     assert alert.kind == "no_progress"
 
 
+def test_controller_enforces_tool_call_budget() -> None:
+    call = type("ToolCall", (), {"id": "1", "name": "read_file", "args": {"path": "a.py"}})()
+    decision = AgentDecision(
+        tool_calls=[call],
+        assistant_message={"role": "assistant", "content": None},
+    )
+    llm = type("FakeLlm", (), {"next_action": lambda self, messages: decision})()
+
+    class Tools:
+        def execute(self, *_args):
+            raise AssertionError("tool must not execute after budget is exhausted")
+
+    controller = AgentController(
+        llm=llm,
+        tool_executor=Tools(),
+        max_tool_calls=1,
+    )
+    controller.handle_user_request("ANSWER", [{"role": "user", "content": "inspect"}])
+    controller.tool_calls.append(("previous", {}))
+    first = controller.step([{"role": "user", "content": "inspect"}])
+    assert len(first.observations) == 1
+    assert controller.last_progress_alert is not None
+    assert controller.last_progress_alert.kind == "tool_budget"
+
+
 def test_verification_results_are_classified() -> None:
     assert classify_verification(True, "exit_code=0").kind == VerificationKind.PASS
     assert classify_verification(False, "exit_code=1\nAssertionError: bad").kind == VerificationKind.ASSERTION_FAILURE
