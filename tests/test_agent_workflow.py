@@ -13,6 +13,7 @@ from memcodeagent.completion import CompletionGuard, CompletionState
 from memcodeagent.llm import AgentDecision
 from memcodeagent.memory.hybrid_retriever import RetrievalContext
 from memcodeagent.policy import PolicyAction, ToolPolicy
+from memcodeagent.progress import ProgressMonitor, ProgressSnapshot
 from memcodeagent.runtime import InvalidTransition, Phase, RuntimeEvent, StateMachine, TransitionGuard
 
 
@@ -213,6 +214,30 @@ def test_completion_guard_read_only_modes_do_not_allow_changes() -> None:
         TaskMode.PLAN,
         CompletionState(plan_generated=True),
     ) is True
+
+
+def test_progress_monitor_detects_duplicate_and_monotony() -> None:
+    monitor = ProgressMonitor(duplicate_limit=1, monotony_limit=3)
+    assert monitor.record_tool("read_file", {"path": "a.py"}) is None
+    duplicate = monitor.record_tool("read_file", {"path": "a.py"})
+    assert duplicate is not None
+    assert duplicate.kind == "duplicate_tool"
+
+    monitor.reset()
+    assert monitor.record_tool("read_file", {"path": "a.py"}) is None
+    assert monitor.record_tool("read_file", {"path": "b.py"}) is None
+    monotony = monitor.record_tool("read_file", {"path": "c.py"})
+    assert monotony is not None
+    assert monotony.kind == "tool_monotony"
+
+
+def test_progress_monitor_detects_no_progress() -> None:
+    monitor = ProgressMonitor(no_progress_limit=2)
+    snapshot = ProgressSnapshot()
+    assert monitor.record_snapshot(snapshot) is None
+    alert = monitor.record_snapshot(snapshot)
+    assert alert is not None
+    assert alert.kind == "no_progress"
 
 
 def test_actionable_task_detection() -> None:

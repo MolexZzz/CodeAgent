@@ -549,6 +549,7 @@ class CodingAgent:
         explored = True
         has_changes = False
         while True:
+            self.controller.reset_budget()
             for step in range(1, self.config.max_steps + 1):
                 step_meta: dict[str, Any] = {"tool_names": []}
 
@@ -666,6 +667,15 @@ class CodingAgent:
                         has_changes = True
                     if observation.ok and tool_call.name in _READ_ONLY_TOOLS:
                         explored = True
+
+                if self.controller.last_progress_alert is not None:
+                    alert = self.controller.last_progress_alert
+                    self.console.print(f"[yellow]进度监控：{alert.message}[/yellow]")
+                    self.controller.last_progress_alert = None
+                    if alert.kind in {"no_progress", "tool_monotony"}:
+                        self.console.print("[yellow]任务因连续无进展而暂停，可继续或调整请求。[/yellow]")
+                        self._phase = "PAUSED"
+                        return
 
                 # Validate after a small batch of edits, or when the model has
                 # moved on from editing to another kind of action. This avoids

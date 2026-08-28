@@ -14,6 +14,7 @@ from typing import Any
 
 from memcodeagent.llm import AgentDecision
 from memcodeagent.policy import PolicyAction, ToolPolicy
+from memcodeagent.progress import ProgressMonitor
 from memcodeagent.runtime import Phase, RuntimeEvent, StateMachine
 from memcodeagent.tools import ToolObservation
 
@@ -44,6 +45,7 @@ class AgentController:
         max_steps: int = 8,
         tool_policy: ToolPolicy | None = None,
         confirmation_callback: Callable[[Any], bool] | None = None,
+        progress_monitor: ProgressMonitor | None = None,
     ) -> None:
         self.llm = llm
         self.tool_executor = tool_executor
@@ -51,6 +53,7 @@ class AgentController:
         self.max_steps = max(1, max_steps)
         self.tool_policy = tool_policy
         self.confirmation_callback = confirmation_callback
+        self.progress_monitor = progress_monitor or ProgressMonitor()
         self.state_machine = StateMachine()
         self.task_mode: str | None = None
         self.step_count = 0
@@ -59,6 +62,7 @@ class AgentController:
         self.last_result: str | None = None
         self.interrupted = False
         self.last_transition_error: str | None = None
+        self.last_progress_alert: Any | None = None
 
     @property
     def phase(self) -> Phase:
@@ -73,6 +77,8 @@ class AgentController:
         self.last_result = None
         self.interrupted = False
         self.last_transition_error = None
+        self.last_progress_alert = None
+        self.progress_monitor.reset()
         self.state_machine = StateMachine()
         self.state_machine.transition(RuntimeEvent.TASK_STARTED)
         requested = {
@@ -156,8 +162,18 @@ class AgentController:
         for tool_call in decision.tool_calls:
             self.tool_calls.append((tool_call.name, dict(tool_call.args)))
             observation = None
+            alert = self.progress_monitor.record_tool(tool_call.name, tool_call.args)
+            self.last_progress_alert = alert
+            if alert is not None and alert.kind == "duplicate_tool":
+                observation = ToolObservation(
+                    tool_call.name,
+                    False,
+                    alert.message,
+                    tool_call.id,
+                )
             if tool_guard is not None:
-                observation = tool_guard(tool_call)
+                if observation is None:
+                    observation = tool_guard(tool_call)
             elif self.tool_policy is not None:
                 context = tool_context(tool_call) if tool_context else {}
                 policy = self.tool_policy.evaluate(
@@ -201,8 +217,22 @@ class AgentController:
                     )
             observations.append(observation)
             messages.append(observation.to_message())
+            progress_alert = self.progress_monitor.record_observation(
+                tool_name=tool_call.name,
+                ok=bool(getattr(observation, "ok", False)),
+                content=str(getattr(observation, "content", "")),
+            )
+            if progress_alert is not None:
+                self.last_progress_alert = progress_alert
 
         return ControllerStep(decision=decision, observations=observations, phase=self.phase)
+
+    def budget_exhausted(self) -> bool:
+        return self.step_count >= self.max_steps
+
+    def reset_budget(self) -> None:
+        """Start another user-approved step budget without losing task state."""
+        self.step_count = 0
 
     def persist_state(self) -> dict[str, Any]:
         """Return serializable runtime state for session persistence."""
