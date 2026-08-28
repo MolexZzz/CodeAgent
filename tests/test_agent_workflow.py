@@ -8,6 +8,7 @@ from memcodeagent.agent import AgentConfig
 from memcodeagent.agent import CodingAgent
 from memcodeagent.agent import IntentRouter
 from memcodeagent.agent import TaskMode
+from memcodeagent.controller import AgentController
 from memcodeagent.llm import AgentDecision
 from memcodeagent.memory.hybrid_retriever import RetrievalContext
 from memcodeagent.runtime import InvalidTransition, Phase, RuntimeEvent, StateMachine, TransitionGuard
@@ -46,6 +47,60 @@ def test_transition_guard_rejects_illegal_phase_changes() -> None:
 
     assert TransitionGuard.next_phase(Phase.TEST, RuntimeEvent.TEST_FAILED) == Phase.IMPLEMENT
     assert machine.try_transition(RuntimeEvent.USER_REJECTED) is False
+
+
+def test_agent_controller_runs_one_tool_turn() -> None:
+    class FakeObservation:
+        ok = True
+        tool_name = "list_files"
+        content = "app.py"
+
+        def to_message(self):
+            return {"role": "tool", "content": self.content}
+
+    class FakeTools:
+        def __init__(self):
+            self.calls = []
+
+        def execute(self, name, args, tool_call_id):
+            self.calls.append((name, args, tool_call_id))
+            return FakeObservation()
+
+    call = type("ToolCall", (), {"id": "1", "name": "list_files", "args": {"glob": "*.py"}})()
+    decision = AgentDecision(
+        tool_calls=[call],
+        assistant_message={"role": "assistant", "content": None},
+    )
+    llm = type("FakeLlm", (), {"next_action": lambda self, messages: decision})()
+    tools = FakeTools()
+    controller = AgentController(llm=llm, tool_executor=tools, max_steps=2)
+    messages = [{"role": "user", "content": "inspect"}]
+
+    controller.handle_user_request("ANSWER", messages)
+    result = controller.step(messages)
+
+    assert result.finished is False
+    assert result.phase == Phase.ANSWER
+    assert tools.calls == [("list_files", {"glob": "*.py"}, "1")]
+    assert messages[-1] == {"role": "tool", "content": "app.py"}
+    assert controller.persist_state()["step_count"] == 1
+
+
+def test_agent_controller_final_answer_transitions_to_done() -> None:
+    decision = AgentDecision(
+        content="done",
+        assistant_message={"role": "assistant", "content": "done"},
+    )
+    llm = type("FakeLlm", (), {"next_action": lambda self, messages: decision})()
+    controller = AgentController(llm=llm, tool_executor=object())
+    messages = [{"role": "user", "content": "why"}]
+
+    controller.handle_user_request("ANSWER", messages)
+    result = controller.step(messages)
+
+    assert result.finished is True
+    assert controller.phase == Phase.DONE
+    assert controller.last_result == "done"
 
 
 def test_actionable_task_detection() -> None:

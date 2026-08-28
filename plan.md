@@ -105,11 +105,11 @@ P0 的目的不是增加很多工具，而是先保证 Agent 的行为可控、�
 
 **目的：** 把阶段、权限、预算、确认和中断统一放在一个 Runtime 控制层，避免逻辑散落在 prompt 和工具循环中。
 
-- [ ] 增加 `AgentController`，统一持有任务模式、当前阶段、计划、步数、工具调用记录和任务结果。
-- [ ] 将现有 `_run_loop_interactive` 中的控制逻辑逐步迁移到 Controller。
-- [ ] Controller 负责每一步循环：准备上下文 → 请求模型 → 解析决策 → 检查策略 → 执行工具 → 记录进度 → 判断是否继续。
-- [ ] Controller 只负责执行 Runtime 策略，不负责决定具体技术方案。
-- [ ] 模型不能直接修改 phase、完成状态或预算。
+- [/] 增加 `AgentController`，统一持有任务模式、当前阶段、计划、步数、工具调用记录和任务结果。
+- [/] 将现有 `_run_loop_interactive` 中的控制逻辑逐步迁移到 Controller。
+- [x] Controller 负责每一步循环：准备上下文 → 请求模型 → 解析决策 → 执行工具 → 记录消息。
+- [x] Controller 只负责执行 Runtime 策略，不负责决定具体技术方案。
+- [x] 模型不能直接修改 phase、完成状态或预算。
 
 **完成标准：** 所有工具调用和任务结束都经过 Controller；CLI 只负责输入输出，不再自行决定 Agent 状态。
 
@@ -328,6 +328,8 @@ P1 的目的，是让 Agent 在较大的真实仓库中“少读、读对、读�
 | 2026-08-28 | 补齐 P0.1：单次 `run()` 接入路由、低置信度澄清、ANSWER/PLAN 只读端到端测试 | 已完成 | 待提交 | `python -m py_compile src\\memcodeagent\\agent.py` 通过；相关 pytest：34 passed |
 | 2026-08-28 | 完成 P0.3 第一小步：独立 `Phase`、`RuntimeEvent`、`TransitionGuard`、`StateMachine` 及转换测试 | 已完成 | 待提交 | `python -m py_compile ...` 通过；相关 pytest：36 passed |
 | 2026-08-28 | P0.3 后续：把状态机接入 AgentController，并拒绝非法工具阶段 | 待开始 | 待提交 | 待验证 |
+| 2026-08-28 | 开始实现 P0.2 AgentController 核心循环 | 进行中 | 待提交 | 待验证 |
+| 2026-08-28 | 完成 P0.2 第一小步：独立 Controller、单步执行、状态持久化和确定性测试 | 部分完成 | 待提交 | `python -m py_compile ...` 通过；相关 pytest：38 passed |
 
 ## 每次代码修改的固定流程
 
