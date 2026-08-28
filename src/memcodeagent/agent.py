@@ -152,11 +152,27 @@ class CodingAgent:
 
     def run(self, task: str) -> str:
         """Single-turn execution: retrieve context, run agent loop, persist memory."""
+        intent = self._resolve_intent(task)
+        if intent is None:
+            return "任务已暂停：未确认本次请求是只读分析、制定计划还是直接修改。"
+        self.console.print(
+            f"[dim]任务模式：{intent.mode.value}（{intent.reason}）[/dim]"
+        )
+
         self.workspace.ensure_exists()
         retrieval_context = self.retriever.retrieve(task)
         self._print_context(retrieval_context)
 
         messages = self._initial_messages(task, retrieval_context)
+        if intent.mode in {TaskMode.ANSWER, TaskMode.PLAN}:
+            result = self._run_read_only_interactive(
+                messages,
+                intent.mode,
+                task,
+                display_final=False,
+            )
+            return result or "只读任务已暂停，尚未生成最终回答。"
+
         result = self._run_loop(messages, task)
         return result
 
@@ -247,7 +263,10 @@ class CodingAgent:
             # Regular user message: add to conversation and run agent loop.
             messages.append({"role": "user", "content": user_input})
             self._save_session(messages)
-            intent = IntentRouter.resolve(user_input)
+            intent = self._resolve_intent(user_input)
+            if intent is None:
+                self.console.print("[yellow]任务已暂停：请重新说明是只读分析、制定计划还是直接修改。[/yellow]")
+                continue
             self.console.print(
                 f"[dim]任务模式：{intent.mode.value}（{intent.reason}）[/dim]"
             )
@@ -381,7 +400,9 @@ class CodingAgent:
         messages: list[dict[str, Any]],
         mode: TaskMode,
         request: str,
-    ) -> None:
+        *,
+        display_final: bool = True,
+    ) -> str | None:
         """Run a bounded read-only loop for ANSWER and PLAN tasks.
 
         This is the first runtime split: code-understanding and plan-only tasks
@@ -428,18 +449,19 @@ class CodingAgent:
             except KeyboardInterrupt:
                 self.console.print("[yellow]已中断。[/yellow]")
                 self._phase = "PAUSED"
-                return
+                return None
 
             self._record_usage(decision)
 
             if decision.is_final:
                 content = self._clean_display_text(decision.content or "(empty response)")
-                if not self.streaming_mode:
+                if display_final and not self.streaming_mode:
                     self.console.print(f"[green]{content}[/green]")
                 messages.append({"role": "assistant", "content": content})
                 self._phase = "COMPLETED"
+                self.retriever.remember_task(request, content)
                 self._save_session(messages)
-                return
+                return content
 
             readonly_messages.append(decision.assistant_message)
             messages.append(decision.assistant_message)
@@ -470,7 +492,7 @@ class CodingAgent:
                     except KeyboardInterrupt:
                         self.console.print("[yellow]已在工具执行期间中断。[/yellow]")
                         self._phase = "PAUSED"
-                        return
+                        return None
 
                 if self.verbose:
                     self.console.print(observation.to_display())
@@ -489,6 +511,7 @@ class CodingAgent:
             "可以继续提问或把任务改成明确的修改请求。[/yellow]"
         )
         self._phase = "PAUSED"
+        return None
 
     def _run_loop_interactive(self, messages: list[dict[str, Any]]) -> None:
         """Core agent loop for interactive mode: uses per-error retry counter."""
@@ -833,6 +856,30 @@ class CodingAgent:
             f"completion: {getattr(usage, 'completion_tokens', 0):,}) | "
             f"Session total: {self.session_total_tokens:,}[/dim]"
         )
+
+    def _resolve_intent(self, text: str) -> IntentResolution | None:
+        """Resolve an intent and ask before guessing when confidence is low."""
+        intent = IntentRouter.resolve(text)
+        if intent.confidence != "low":
+            return intent
+
+        choices = {
+            "只分析并回答（不修改文件）": TaskMode.ANSWER,
+            "先制定修改计划（不修改文件）": TaskMode.PLAN,
+            "直接修改并验证": TaskMode.MODIFY,
+        }
+        try:
+            selected = questionary.select(
+                "这次希望我怎么处理？",
+                choices=list(choices),
+            ).ask()
+        except (KeyboardInterrupt, EOFError):
+            return None
+
+        mode = choices.get(selected)
+        if mode is None:
+            return None
+        return IntentResolution(mode, "clarified", f"用户已明确选择 {mode.value} 模式")
 
     @staticmethod
     def _summarize_test_output(content: str, limit: int = 2000) -> str:

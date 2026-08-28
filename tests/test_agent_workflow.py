@@ -1,9 +1,15 @@
 from pathlib import Path
+from io import StringIO
+from unittest.mock import Mock, patch
+
+from rich.console import Console
 
 from memcodeagent.agent import AgentConfig
 from memcodeagent.agent import CodingAgent
 from memcodeagent.agent import IntentRouter
 from memcodeagent.agent import TaskMode
+from memcodeagent.llm import AgentDecision
+from memcodeagent.memory.hybrid_retriever import RetrievalContext
 
 
 def test_phase_tool_permissions() -> None:
@@ -54,6 +60,70 @@ def test_intent_router_explicit_mutation_wins() -> None:
 
     for text in examples:
         assert IntentRouter.resolve(text).mode == TaskMode.MODIFY
+
+
+def test_low_confidence_intent_requires_user_choice(tmp_path: Path) -> None:
+    agent = CodingAgent(AgentConfig(workspace=tmp_path), console=Mock())
+    with patch("memcodeagent.agent.questionary.select") as select:
+        select.return_value.ask.return_value = "直接修改并验证"
+        intent = agent._resolve_intent("请处理一下这个问题")
+
+    assert intent is not None
+    assert intent.mode == TaskMode.MODIFY
+    assert intent.confidence == "clarified"
+    select.assert_called_once()
+
+
+def test_single_turn_answer_mode_does_not_execute_tools(tmp_path: Path) -> None:
+    console = Console(file=StringIO())
+    agent = CodingAgent(AgentConfig(workspace=tmp_path, max_steps=2), console=console)
+    agent.retriever.retrieve = Mock(return_value=RetrievalContext())
+    agent.retriever.remember_task = Mock()
+    decision = AgentDecision(
+        content="这是只读分析结果。",
+        assistant_message={"role": "assistant", "content": "这是只读分析结果。"},
+    )
+
+    with patch.object(agent.llm, "next_action", return_value=decision), patch.object(
+        agent.tools, "execute"
+    ) as execute:
+        result = agent.run("为什么这个函数会返回 None？")
+
+    assert result == "这是只读分析结果。"
+    execute.assert_not_called()
+
+
+def test_single_turn_plan_mode_rejects_edit_tools(tmp_path: Path) -> None:
+    console = Console(file=StringIO())
+    agent = CodingAgent(AgentConfig(workspace=tmp_path, max_steps=2), console=console)
+    agent.retriever.retrieve = Mock(return_value=RetrievalContext())
+    agent.retriever.remember_task = Mock()
+    edit = Mock()
+    edit.id = "edit-1"
+    edit.name = "apply_patch"
+    edit.args = {"path": "src/app.py", "edits": [{"old": "a", "new": "b"}]}
+    decisions = [
+        AgentDecision(
+            tool_calls=[edit],
+            assistant_message={
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{"id": "edit-1", "function": {"name": "apply_patch"}}],
+            },
+        ),
+        AgentDecision(
+            content="计划已生成。",
+            assistant_message={"role": "assistant", "content": "计划已生成。"},
+        ),
+    ]
+
+    with patch.object(agent.llm, "next_action", side_effect=decisions), patch.object(
+        agent.tools, "execute"
+    ) as execute:
+        result = agent.run("给我一个修改计划，先不要改代码")
+
+    assert result == "计划已生成。"
+    execute.assert_not_called()
 
 
 def test_session_state_defaults(tmp_path: Path) -> None:
