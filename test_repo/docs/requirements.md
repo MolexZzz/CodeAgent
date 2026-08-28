@@ -1,46 +1,42 @@
-# TicketDesk Maintenance Requirements
+# TicketDesk 维护需求
 
-## Context
+## 项目背景
 
-TicketDesk is an internal support-ticket service used by a small operations
-team. The current version supports creating tickets, viewing a ticket,
-closing a ticket, and listing a user's inbox.
+TicketDesk 是一个供小型运营团队使用的内部工单服务。当前版本支持创建工单、
+查看工单、关闭工单，以及查看用户自己的工单列表。
 
-## Maintenance request
+## 本次维护任务
 
-Please prepare the next release of TicketDesk:
+请为 TicketDesk 准备下一版本：
 
-1. Fix the ticket-list status filter. `list_tickets(requester, status=...)`
-   must filter by `Ticket.status`, not by priority. Existing callers that omit
-   `status` must keep the same behavior.
-2. Add priority sorting and pagination to the inbox:
+1. 修复工单列表的状态筛选。`list_tickets(requester, status=...)` 必须按照
+   `Ticket.status` 筛选，而不是按照优先级筛选。未传入 `status` 的现有调用方式
+   必须保持兼容。
+2. 为工单列表增加优先级排序和分页：
    `list_tickets(requester, status=None, sort_by="created_at", descending=False,
    page=1, page_size=20)`.
-   - Valid sort fields are `created_at`, `priority`, and `title`.
-   - Priority order is `urgent > high > medium > low`.
-   - Invalid page values or sort fields should raise `ValueError`.
-3. Add `reopen_ticket(ticket_id, requester)` and preserve the owner/admin
-   authorization rule used by `get_ticket` and `close_ticket`.
-4. Review the validation code in `service.py` and `cli.py`. Remove duplicated
-   validation logic without changing the public helper functions.
-5. Add regression and boundary tests for filtering, sorting, pagination,
-   reopening, authorization, and invalid input.
-6. Update `README.md` with the new inbox behavior and run the complete test
-   suite.
+   - 合法的排序字段为 `created_at`、`priority` 和 `title`。
+   - 优先级顺序为 `urgent > high > medium > low`。
+   - 无效的页码、每页数量或排序字段必须抛出 `ValueError`。
+3. 增加 `reopen_ticket(ticket_id, requester)`，并保持
+   `get_ticket` 和 `close_ticket` 使用的工单所有者/管理员权限规则。
+4. 检查 `service.py` 和 `cli.py` 中的校验代码。在不改变公开辅助函数的前提下，
+   移除重复的校验逻辑。
+5. 为筛选、排序、分页、重新打开工单、权限控制和无效输入增加回归测试及边界测试。
+6. 在 `README.md` 中补充新的工单列表行为，并运行完整测试集。
 
-## Acceptance criteria
+## 验收标准
 
-- Existing tests continue to pass.
-- A user can only list, view, close, or reopen their own tickets; `admin` can
-manage all tickets.
+- 现有测试必须继续通过。
+- 普通用户只能列出、查看、关闭或重新打开自己的工单；`admin` 可以管理所有工单。
+- 不得修改与本次需求无关的文件。
+- 最终测试命令必须成功退出。
 
-## Known issues in the current release
+## 当前版本的已知问题
 
-The current release is intentionally incomplete for maintenance practice:
+当前版本为了用于维护实践，特意保留了以下未完成内容：
 
-- status filtering is incorrect in the inbox;
-- the requested sorting, pagination, and reopen capabilities do not exist;
-- validation rules are duplicated between layers;
-- regression coverage for these behaviors is missing.
-- No unrelated files are changed.
-- The final test command exits successfully.
+- 工单列表的状态筛选逻辑不正确；
+- 尚未实现排序、分页和重新打开工单功能；
+- 不同层中存在重复的校验逻辑；
+- 尚未覆盖上述行为的回归测试。
