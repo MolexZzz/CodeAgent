@@ -35,6 +35,17 @@ class AgentConfig:
 
 # Tools that modify code on disk and should trigger a verification test run.
 _CODE_EDIT_TOOLS = {"write_file", "apply_patch"}
+_READ_ONLY_TOOLS = {"list_files", "read_file", "search_text"}
+_PHASE_LABELS = {
+    "PLANNING": "制定计划",
+    "EXPLORING": "检查项目",
+    "IMPLEMENTING": "实现修改",
+    "TESTING": "运行验证",
+    "FIXING": "修复失败",
+    "VERIFYING": "最终验收",
+    "COMPLETED": "已完成",
+    "PAUSED": "已暂停",
+}
 
 
 class CodingAgent:
@@ -61,6 +72,8 @@ class CodingAgent:
         self.session_total_tokens = 0
         self._session_path = self.workspace.root / ".memcode" / "session.json"
         self._stop_requested = False
+        self._phase = "IDLE"
+        self._plan_text = ""
 
     def run(self, task: str) -> str:
         """Single-turn execution: retrieve context, run agent loop, persist memory."""
@@ -293,6 +306,7 @@ class CodingAgent:
         seen_calls: set[tuple[str, str]] = set()
         phase = "INSPECTING"
         pending_edits = 0
+        explored = False
 
         while True:
             for step in range(1, self.config.max_steps + 1):
@@ -337,20 +351,28 @@ class CodingAgent:
                 if decision.is_final:
                     if pending_edits:
                         self._print_phase("TESTING", step, self.config.max_steps)
-                        self._run_verification_tests(messages)
+                        test_failed = self._run_verification_tests(messages)
                         pending_edits = 0
+                        if test_failed:
+                            phase = "FIXING"
+                            self._print_phase(phase, step, self.config.max_steps)
+                            continue
+                        phase = "VERIFYING"
+                        self._print_phase(phase, step, self.config.max_steps)
                     if not self.streaming_mode:
                         self.console.print(f"[green]{decision.content}[/green]")
                     messages.append(decision.assistant_message)
+                    self._phase = "COMPLETED"
+                    self._save_session(messages)
                     return
 
                 # Tool calls: show simplified or detailed view based on verbose flag
                 tool_names = [tc.name for tc in decision.tool_calls]
-                if any(name in _CODE_EDIT_TOOLS for name in tool_names):
+                if any(name in _CODE_EDIT_TOOLS for name in tool_names) and explored:
                     phase = "IMPLEMENTING"
                 elif pending_edits and "run_command" in tool_names:
                     phase = "TESTING"
-                else:
+                elif any(name in _READ_ONLY_TOOLS for name in tool_names):
                     phase = "INSPECTING"
                 self._print_phase(phase, step, self.config.max_steps)
                 if self.verbose:
@@ -368,7 +390,15 @@ class CodingAgent:
 
                 for tool_call in decision.tool_calls:
                     call_key = (tool_call.name, json.dumps(tool_call.args, sort_keys=True, ensure_ascii=False))
-                    if call_key in seen_calls:
+                    if not self._tool_allowed_in_phase(phase, tool_call.name, explored):
+                        observation = ToolObservation(
+                            tool_call.name,
+                            False,
+                            f"当前阶段“{_PHASE_LABELS.get(phase, phase)}”不允许调用 {tool_call.name}。"
+                            "请先完成项目检查，再进入实现阶段。",
+                            tool_call.id,
+                        )
+                    elif call_key in seen_calls:
                         observation = ToolObservation(tool_call.name, False, "Duplicate tool call suppressed; use a different path, range, query, or command.", tool_call.id)
                     elif self._requires_approval(tool_call.name) and not self._confirm_tool(tool_call.name, tool_call.args):
                         seen_calls.add(call_key)
@@ -395,6 +425,8 @@ class CodingAgent:
                         code_changed = True
                         phase = "IMPLEMENTING"
                         pending_edits += 1
+                    if observation.ok and tool_call.name in _READ_ONLY_TOOLS:
+                        explored = True
 
                 # Validate after a small batch of edits, or when the model has
                 # moved on from editing to another kind of action. This avoids
@@ -412,6 +444,8 @@ class CodingAgent:
                     if test_failed:
                         current_step_has_error = True
                         phase = "FIXING"
+                    else:
+                        phase = "VERIFYING"
 
                 if current_step_has_error:
                     if last_error_detected:
@@ -430,6 +464,7 @@ class CodingAgent:
                         last_error_detected = False
 
             self.console.print(f"[yellow]Paused after {step} agent steps ({self.config.max_steps}-step budget reached).[/yellow]")
+            self._phase = "PAUSED"
             if continuation_count >= self.config.max_continuations:
                 self.console.print("[dim]Continuation limit reached. Task paused; start a new message to continue.[/dim]")
                 return
@@ -478,9 +513,23 @@ class CodingAgent:
         # Keep the approved plan in the conversation so later tool decisions
         # can follow the same outline without relying on hidden state.
         if decision.content:
+            self._plan_text = decision.content
             messages.append({"role": "assistant", "content": f"计划：\n{decision.content}"})
         messages.append({"role": "user", "content": "计划已确认。现在开始执行，按计划检查、修改并验证项目。"})
+        self._phase = "EXPLORING"
         self._save_session(messages)
+        return True
+
+    @staticmethod
+    def _tool_allowed_in_phase(phase: str, tool_name: str, explored: bool) -> bool:
+        if phase in {"PLANNING", "COMPLETED", "PAUSED"}:
+            return False
+        if phase in {"EXPLORING", "INSPECTING"}:
+            return tool_name in _READ_ONLY_TOOLS
+        if phase in {"IMPLEMENTING", "FIXING"}:
+            return tool_name in _READ_ONLY_TOOLS | _CODE_EDIT_TOOLS | {"run_command"}
+        if phase in {"TESTING", "VERIFYING"}:
+            return tool_name in _READ_ONLY_TOOLS | {"run_command"}
         return True
 
     @staticmethod
@@ -508,15 +557,9 @@ class CodingAgent:
         return len(latest) >= 12 or any(word in latest for word in action_words)
 
     def _print_phase(self, phase: str, step: int, limit: int) -> None:
-        labels = {
-            "INSPECTING": "检查项目",
-            "IMPLEMENTING": "实现修改",
-            "TESTING": "运行验证",
-            "FIXING": "修复失败",
-            "COMPLETING": "整理结果",
-        }
+        self._phase = phase
         self.console.print(
-            f"[cyan]阶段：{labels.get(phase, phase)}[/cyan] "
+            f"[cyan]阶段：{_PHASE_LABELS.get(phase, phase)}[/cyan] "
             f"[dim]步骤 {step}/{limit}[/dim]"
         )
 
@@ -569,13 +612,22 @@ class CodingAgent:
     def _save_session(self, messages: list[dict[str, Any]]) -> None:
         import json
         self._session_path.parent.mkdir(parents=True, exist_ok=True)
-        self._session_path.write_text(json.dumps({"messages": messages}, ensure_ascii=False, indent=2), encoding="utf-8")
+        self._session_path.write_text(
+            json.dumps(
+                {"messages": messages, "phase": self._phase, "plan": self._plan_text},
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
 
     def _load_session(self) -> list[dict[str, Any]] | None:
         import json
         try:
             data = json.loads(self._session_path.read_text(encoding="utf-8"))
             messages = data.get("messages")
+            self._phase = data.get("phase", "IDLE")
+            self._plan_text = data.get("plan", "")
             return messages if isinstance(messages, list) and messages else None
         except (OSError, json.JSONDecodeError):
             return None
@@ -604,8 +656,9 @@ class CodingAgent:
                     "inside this directory; never add `cd /workspace`, `/e/workspace`, or switch to "
                     "another project. Use relative paths. Before the first tool call, briefly state a "
                     "3-5 step plan in your assistant content. Inspect only files relevant to the task, "
-                    "use line ranges for large files, avoid repeating an identical tool call, and "
-                    "finish with verification and a concise summary."
+                    "use line ranges for large files, avoid repeating an identical tool call, do not "
+                    "weaken or delete tests just to make them pass, and finish with verification and "
+                    "a concise summary."
                 ),
             },
             {
@@ -625,8 +678,9 @@ class CodingAgent:
                     "inside this directory; never add `cd /workspace`, `/e/workspace`, or switch to "
                     "another project. Use relative paths. Before the first tool call, briefly state a "
                     "3-5 step plan in your assistant content. Inspect only files relevant to the task, "
-                    "use line ranges for large files, avoid repeating an identical tool call, and "
-                    "finish with verification and a concise summary. "
+                    "use line ranges for large files, avoid repeating an identical tool call, do not "
+                    "weaken or delete tests just to make them pass, and finish with verification and "
+                    "a concise summary. "
                     "You are in an interactive chat session, so the user may ask follow-up questions or "
                     "refine their requests across multiple turns."
                 ),
