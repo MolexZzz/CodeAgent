@@ -54,6 +54,12 @@ mca run "阅读这个项目并总结下一步实现方向"
 
 # 交互式 REPL
 mca chat
+
+# 带外部验收命令的仓库任务
+mca --acceptance-command "python D:\Coding Agent\scripts\evaluate_ticketdesk.py {workspace}"
+
+# 如确实需要修改已有测试，可关闭基线测试保护
+mca --no-protect-tests
 ```
 
 ### 环境变量说明

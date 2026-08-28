@@ -16,12 +16,12 @@ from pathlib import Path
 
 def main() -> int:
     if len(sys.argv) != 2:
-        print("用法：python scripts/evaluate_ticketdesk.py <TicketDesk workspace>")
+        print("Usage: python scripts/evaluate_ticketdesk.py <TicketDesk workspace>")
         return 2
 
     workspace = Path(sys.argv[1]).resolve()
     if not (workspace / "ticketdesk").is_dir():
-        print(f"错误：不是有效的 TicketDesk workspace：{workspace}")
+        print(f"Error: invalid TicketDesk workspace: {workspace}")
         return 2
 
     test = subprocess.run(
@@ -36,21 +36,21 @@ def main() -> int:
     if test.stderr:
         print(test.stderr, file=sys.stderr, end="")
     if test.returncode != 0:
-        print("隐藏验收失败：仓库测试未通过。")
+        print("External acceptance failed: repository tests did not pass.")
         return 1
 
     sys.path.insert(0, str(workspace))
     from ticketdesk.service import TicketService
 
     service = TicketService()
-    closed = service.create_ticket("旧打印机", "无法打印", "alice", "low")
+    closed = service.create_ticket("Old printer", "Cannot print", "alice", "low")
     urgent = service.create_ticket("VPN", "无法连接", "alice", "urgent")
     closed.status = "closed"
     service.repository.save(closed)
     urgent.status = "in_progress"
     service.repository.save(urgent)
 
-    assert [ticket.title for ticket in service.list_tickets("alice", status="closed")] == ["旧打印机"]
+    assert [ticket.title for ticket in service.list_tickets("alice", status="closed")] == ["Old printer"]
     assert service.list_tickets("alice", sort_by="priority", descending=True, page_size=1)[0].title == "VPN"
     assert service.reopen_ticket(closed.id, "alice").status == "open"
 
@@ -59,9 +59,9 @@ def main() -> int:
     except PermissionError:
         pass
     else:
-        raise AssertionError("普通用户不能查看其他用户的工单")
+        raise AssertionError("non-owner should not view another user's ticket")
 
-    print("隐藏验收通过：状态筛选、排序分页、reopen 和权限控制均正常。")
+    print("External acceptance passed: filtering, sorting, pagination, reopen, and authorization work.")
     return 0
 
 

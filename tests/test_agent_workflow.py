@@ -22,3 +22,20 @@ def test_session_state_defaults(tmp_path: Path) -> None:
     agent = CodingAgent(AgentConfig(workspace=tmp_path))
     assert agent._phase == "IDLE"
     assert agent._plan_text == ""
+
+
+def test_existing_tests_are_protected(tmp_path: Path) -> None:
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_existing.py").write_text("def test_ok(): assert True")
+    agent = CodingAgent(AgentConfig(workspace=tmp_path))
+    agent._protected_test_files = agent._snapshot_test_files()
+
+    assert agent._is_protected_test_edit("apply_patch", {"path": "tests/test_existing.py"}) is True
+    assert agent._is_protected_test_edit("write_file", {"path": "tests/test_existing.py"}) is True
+    assert agent._is_protected_test_edit("write_file", {"path": "tests/test_new.py"}) is False
+
+
+def test_acceptance_is_optional_by_default(tmp_path: Path) -> None:
+    agent = CodingAgent(AgentConfig(workspace=tmp_path))
+    assert agent._run_external_acceptance([]) is True

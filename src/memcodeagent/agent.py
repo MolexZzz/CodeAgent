@@ -31,6 +31,8 @@ class AgentConfig:
     test_command: str | None = None  # None = auto-detect (pytest if a tests/ dir exists)
     approval_required: bool = False
     max_continuations: int = 3
+    acceptance_command: str | None = None
+    protect_existing_tests: bool = True
 
 
 # Tools that modify code on disk and should trigger a verification test run.
@@ -74,6 +76,7 @@ class CodingAgent:
         self._stop_requested = False
         self._phase = "IDLE"
         self._plan_text = ""
+        self._protected_test_files: set[str] = set()
 
     def run(self, task: str) -> str:
         """Single-turn execution: retrieve context, run agent loop, persist memory."""
@@ -396,7 +399,15 @@ class CodingAgent:
 
                 for tool_call in decision.tool_calls:
                     call_key = (tool_call.name, json.dumps(tool_call.args, sort_keys=True, ensure_ascii=False))
-                    if not self._tool_allowed_in_phase(phase, tool_call.name, explored):
+                    if self._is_protected_test_edit(tool_call.name, tool_call.args):
+                        observation = ToolObservation(
+                            tool_call.name,
+                            False,
+                            "Baseline test files are protected. Add new tests in a new file, "
+                            "but do not modify tests that existed when the task started.",
+                            tool_call.id,
+                        )
+                    elif not self._tool_allowed_in_phase(phase, tool_call.name, explored):
                         observation = ToolObservation(
                             tool_call.name,
                             False,
@@ -529,6 +540,8 @@ class CodingAgent:
 
     def _prepare_task(self, messages: list[dict[str, Any]]) -> bool:
         """Explore with read-only tools, then generate and approve a grounded plan."""
+        if self.config.protect_existing_tests:
+            self._protected_test_files = self._snapshot_test_files()
         self._phase = "EXPLORING"
         self.console.rule("[bold cyan]探索项目")
         exploration_instruction = {
@@ -583,14 +596,14 @@ class CodingAgent:
 
     def _run_external_acceptance(self, messages: list[dict[str, Any]]) -> bool:
         """Run repository-independent acceptance checks when available."""
-        verifier = Path(__file__).resolve().parents[2] / "scripts" / "evaluate_ticketdesk.py"
-        if not verifier.exists() or not (self.workspace.root / "ticketdesk").is_dir():
+        if not self.config.acceptance_command:
             return True
-        self.console.print("[dim]运行外部验收：evaluate_ticketdesk.py[/dim]")
+        command = self.config.acceptance_command.replace("{workspace}", str(self.workspace.root))
+        self.console.print("[dim]运行外部验收命令[/dim]")
         try:
             observation = self.tools.execute(
                 "run_command",
-                {"command": f'python "{verifier}" "{self.workspace.root}"'},
+                {"command": command},
                 tool_call_id=None,
             )
         except KeyboardInterrupt:
@@ -598,7 +611,26 @@ class CodingAgent:
             return False
         self.console.print(observation.to_display() if self.verbose else f"[dim]  {'✓' if observation.ok else '✗'} external acceptance[/dim]")
         messages.append({"role": "user", "content": f"External acceptance: {'PASSED' if observation.ok else 'FAILED'}\n{observation.content}"})
-        return observation.ok and "隐藏验收通过" in observation.content
+        return observation.ok
+
+    def _snapshot_test_files(self) -> set[str]:
+        files: list[Path] = []
+        for dirname in ("tests", "test"):
+            root = self.workspace.root / dirname
+            if root.is_dir():
+                files.extend(path for path in root.rglob("*") if path.is_file())
+        files.extend(path for path in self.workspace.root.glob("test_*.py") if path.is_file())
+        return {
+            path.relative_to(self.workspace.root).as_posix()
+            for path in files
+            if not self.workspace.should_ignore(path)
+        }
+
+    def _is_protected_test_edit(self, tool_name: str, args: dict[str, Any]) -> bool:
+        if tool_name not in _CODE_EDIT_TOOLS or not self._protected_test_files:
+            return False
+        path = str(args.get("path", "")).replace("\\", "/").lstrip("./")
+        return path in self._protected_test_files
 
     def _record_usage(self, decision: Any) -> None:
         usage = getattr(decision, "usage", None)
