@@ -327,11 +327,12 @@ P1 的目的，是让 Agent 在较大的真实仓库中“少读、读对、读�
 | 2026-08-28 | 实现 P0.1 IntentRouter 初版：`ANSWER`/`PLAN` 只读分流，`MODIFY` 进入现有修改闭环 | 已完成 | `5a6754c` | 相关 pytest：31 passed |
 | 2026-08-28 | 补齐 P0.1：单次 `run()` 接入路由、低置信度澄清、ANSWER/PLAN 只读端到端测试 | 已完成 | 待提交 | `python -m py_compile src\\memcodeagent\\agent.py` 通过；相关 pytest：34 passed |
 | 2026-08-28 | 完成 P0.3 第一小步：独立 `Phase`、`RuntimeEvent`、`TransitionGuard`、`StateMachine` 及转换测试 | 已完成 | 待提交 | `python -m py_compile ...` 通过；相关 pytest：36 passed |
-| 2026-08-28 | P0.3 后续：把状态机接入 AgentController，并拒绝非法工具阶段 | 待开始 | 待提交 | 待验证 |
-| 2026-08-28 | 开始实现 P0.2 AgentController 核心循环 | 进行中 | 待提交 | 待验证 |
+| 2026-08-28 | P0.3 后续：把状态机接入 AgentController，并拒绝非法工具阶段 | 部分完成 | 待提交 | 计划确认/探索完成事件已接入，完整阶段迁移待完成 |
+| 2026-08-28 | 开始实现 P0.2 AgentController 核心循环 | 已完成 | `81a502f` | 已由后续提交继续接管交互循环 |
 | 2026-08-28 | 完成 P0.2 第一小步：独立 Controller、单步执行、状态持久化和确定性测试 | 已完成 | `81a502f` | 相关 pytest：38 passed |
 | 2026-08-28 | 完成 P0.2 第二小步：交互循环通过 Controller 获取决策并执行工具 | 部分完成 | 待提交 | `python -m py_compile ...` 通过；相关 pytest：38 passed |
 | 2026-08-28 | 完成 P0.2/P0.4 衔接：独立 `ToolPolicy`，由 Controller 统一执行 ALLOW/DENY/CONFIRM | 部分完成 | 待提交 | `python -m py_compile ...` 通过；相关 pytest：39 passed |
+| 2026-08-28 | P0.2/P0.3/P0.4 衔接：Controller 接收状态事件，计划确认/拒绝和探索完成写入状态机；策略拒绝路径加入回归测试 | 部分完成 | 待提交 | `python -m py_compile ...` 通过；相关 pytest：40 passed |
 
 ## 每次代码修改的固定流程
 

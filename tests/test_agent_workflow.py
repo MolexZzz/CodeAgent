@@ -134,6 +134,50 @@ def test_tool_policy_permission_matrix() -> None:
     ).action == PolicyAction.DENY
 
 
+def test_controller_policy_can_deny_without_executing_tool() -> None:
+    class FakeObservation:
+        ok = True
+        tool_name = "apply_patch"
+        content = "should not run"
+
+        def to_message(self):
+            return {"role": "tool", "content": self.content}
+
+    class FakeTools:
+        def __init__(self):
+            self.calls = 0
+
+        def execute(self, *_args):
+            self.calls += 1
+            return FakeObservation()
+
+    call = type("ToolCall", (), {"id": "1", "name": "apply_patch", "args": {}})()
+    decision = AgentDecision(
+        tool_calls=[call],
+        assistant_message={"role": "assistant", "content": None},
+    )
+    llm = type("FakeLlm", (), {"next_action": lambda self, messages: decision})()
+    tools = FakeTools()
+    controller = AgentController(
+        llm=llm,
+        tool_executor=tools,
+        tool_policy=ToolPolicy(),
+    )
+    messages = [{"role": "user", "content": "inspect"}]
+    controller.handle_user_request("ANSWER", messages)
+
+    result = controller.step(
+        messages,
+        tool_context=lambda _tool_call: {
+            "phase": "ANSWERING",
+            "approval_required": True,
+        },
+    )
+
+    assert result.observations[0].ok is False
+    assert tools.calls == 0
+
+
 def test_actionable_task_detection() -> None:
     assert CodingAgent._should_plan([{"role": "user", "content": "你好"}]) is False
     assert CodingAgent._should_plan([{"role": "user", "content": "请修复登录模块并补充测试"}]) is True

@@ -17,6 +17,7 @@ from memcodeagent.controller import AgentController
 from memcodeagent.llm import LlmClient
 from memcodeagent.memory.hybrid_retriever import HybridRetriever, RetrievalContext
 from memcodeagent.policy import ToolPolicy
+from memcodeagent.runtime import RuntimeEvent
 from memcodeagent.tools import ToolExecutor, ToolObservation
 from memcodeagent.workspace import Workspace
 
@@ -527,6 +528,7 @@ class CodingAgent:
 
     def _run_loop_interactive(self, messages: list[dict[str, Any]]) -> None:
         """Core agent loop for interactive mode: uses per-error retry counter."""
+        self.controller.handle_user_request("MODIFY", messages)
         if self._should_plan(messages) and not self._prepare_task(messages):
             return
 
@@ -539,8 +541,6 @@ class CodingAgent:
         pending_edits = 0
         explored = True
         has_changes = False
-        self.controller.handle_user_request("MODIFY", messages)
-
         while True:
             for step in range(1, self.config.max_steps + 1):
                 step_meta: dict[str, Any] = {"tool_names": []}
@@ -734,12 +734,14 @@ class CodingAgent:
         self.console.rule("[bold cyan]Plan")
         self.console.print(decision.content or "(No plan returned.)")
         self.console.print("[dim]No files or commands have been changed during planning.[/dim]")
+        self.controller.transition(RuntimeEvent.PLAN_READY)
         try:
             approved = questionary.confirm("开始按这个计划执行？", default=True).ask()
         except (KeyboardInterrupt, EOFError):
             approved = False
         if not approved:
             self.console.print("[dim]Plan accepted? No. Task remains unchanged.[/dim]")
+            self.controller.transition(RuntimeEvent.USER_REJECTED)
             return False
 
         # Keep the approved plan in the conversation so later tool decisions
@@ -748,7 +750,8 @@ class CodingAgent:
             self._plan_text = decision.content
             messages.append({"role": "assistant", "content": f"计划：\n{decision.content}"})
         messages.append({"role": "user", "content": "计划已确认。现在开始执行，按计划检查、修改并验证项目。"})
-        self._phase = "EXPLORING"
+        self.controller.transition(RuntimeEvent.USER_APPROVED)
+        self._phase = "IMPLEMENTING"
         self._save_session(messages)
         return True
 
@@ -806,6 +809,7 @@ class CodingAgent:
         if not explored:
             self.console.print("[yellow]未获得有效的项目探索结果，任务暂停。[/yellow]")
             return False
+        self.controller.transition(RuntimeEvent.EXPLORATION_COMPLETE)
         return self._confirm_interactive_plan(messages)
 
     def _print_diff_summary(self, messages: list[dict[str, Any]]) -> None:

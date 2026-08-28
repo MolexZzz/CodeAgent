@@ -58,6 +58,7 @@ class AgentController:
         self.last_decision: AgentDecision | None = None
         self.last_result: str | None = None
         self.interrupted = False
+        self.last_transition_error: str | None = None
 
     @property
     def phase(self) -> Phase:
@@ -71,6 +72,7 @@ class AgentController:
         self.last_decision = None
         self.last_result = None
         self.interrupted = False
+        self.last_transition_error = None
         self.state_machine = StateMachine()
         self.state_machine.transition(RuntimeEvent.TASK_STARTED)
         requested = {
@@ -80,6 +82,16 @@ class AgentController:
         }.get(self.task_mode)
         if requested is not None:
             self.state_machine.transition(requested)
+
+    def transition(self, event: RuntimeEvent) -> bool:
+        """Advance runtime state through a guarded event."""
+        try:
+            self.state_machine.transition(event)
+        except ValueError as exc:
+            self.last_transition_error = str(exc)
+            return False
+        self.last_transition_error = None
+        return True
 
     def step(
         self,
@@ -132,9 +144,9 @@ class AgentController:
         if decision.is_final:
             self.last_result = decision.content or ""
             if self.task_mode == "ANSWER":
-                self.state_machine.try_transition(RuntimeEvent.ANSWER_GENERATED)
+                self.transition(RuntimeEvent.ANSWER_GENERATED)
             elif self.task_mode == "PLAN":
-                self.state_machine.try_transition(RuntimeEvent.PLAN_GENERATED)
+                self.transition(RuntimeEvent.PLAN_GENERATED)
             return ControllerStep(decision=decision, phase=self.phase)
 
         if before_tools is not None:
