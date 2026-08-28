@@ -10,6 +10,7 @@ from memcodeagent.agent import IntentRouter
 from memcodeagent.agent import TaskMode
 from memcodeagent.llm import AgentDecision
 from memcodeagent.memory.hybrid_retriever import RetrievalContext
+from memcodeagent.runtime import InvalidTransition, Phase, RuntimeEvent, StateMachine, TransitionGuard
 
 
 def test_phase_tool_permissions() -> None:
@@ -20,6 +21,31 @@ def test_phase_tool_permissions() -> None:
     assert CodingAgent._tool_allowed_in_phase("TESTING", "run_command", True)
     assert CodingAgent._tool_allowed_in_phase("VERIFYING", "diff_summary", True)
     assert not CodingAgent._tool_allowed_in_phase("COMPLETED", "read_file", True)
+
+
+def test_transition_guard_accepts_modify_workflow() -> None:
+    machine = StateMachine()
+    assert machine.transition(RuntimeEvent.TASK_STARTED) == Phase.UNDERSTAND
+    assert machine.transition(RuntimeEvent.EXPLORATION_COMPLETE) == Phase.PLAN
+    assert machine.transition(RuntimeEvent.PLAN_READY) == Phase.CONFIRM
+    assert machine.transition(RuntimeEvent.USER_APPROVED) == Phase.IMPLEMENT
+    assert machine.transition(RuntimeEvent.IMPLEMENTATION_DONE) == Phase.DIFF_CHECK
+    assert machine.transition(RuntimeEvent.DIFF_CHECKED) == Phase.TEST
+    assert machine.transition(RuntimeEvent.TEST_PASSED) == Phase.VERIFY
+    assert machine.transition(RuntimeEvent.ANSWER_GENERATED) == Phase.DONE
+
+
+def test_transition_guard_rejects_illegal_phase_changes() -> None:
+    machine = StateMachine(Phase.PLAN)
+    try:
+        machine.transition(RuntimeEvent.USER_APPROVED)
+    except InvalidTransition as exc:
+        assert "not allowed" in str(exc)
+    else:
+        raise AssertionError("illegal transition should be rejected")
+
+    assert TransitionGuard.next_phase(Phase.TEST, RuntimeEvent.TEST_FAILED) == Phase.IMPLEMENT
+    assert machine.try_transition(RuntimeEvent.USER_REJECTED) is False
 
 
 def test_actionable_task_detection() -> None:

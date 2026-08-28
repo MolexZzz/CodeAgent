@@ -133,9 +133,9 @@ TEST 失败 → IMPLEMENT
 需要重新设计 → PLAN
 ```
 
-- [/] 定义明确的 `Phase` 枚举。
-- [/] 定义明确的事件，如 `exploration_complete`、`plan_ready`、`user_approved`、`implementation_done`、`test_failed`。
-- [/] 通过 `transition(current_phase, event)` 决定下一阶段。
+- [x] 定义明确的 `Phase` 枚举。
+- [x] 定义明确的事件，如 `exploration_complete`、`plan_ready`、`user_approved`、`implementation_done`、`test_failed`。
+- [x] 通过 `transition(current_phase, event)` 决定下一阶段。
 - [ ] 禁止模型直接写入阶段字段。
 - [ ] 非法转换记录 Runtime 错误并要求模型重新决策。
 
@@ -326,7 +326,8 @@ P1 的目的，是让 Agent 在较大的真实仓库中“少读、读对、读�
 | 2026-08-28 | 补充模块职责边界、`CompletionGuard` 和 P0 实际开发顺序 | 已完成 | `0488696` | `git diff --check` 通过 |
 | 2026-08-28 | 实现 P0.1 IntentRouter 初版：`ANSWER`/`PLAN` 只读分流，`MODIFY` 进入现有修改闭环 | 已完成 | `5a6754c` | 相关 pytest：31 passed |
 | 2026-08-28 | 补齐 P0.1：单次 `run()` 接入路由、低置信度澄清、ANSWER/PLAN 只读端到端测试 | 已完成 | 待提交 | `python -m py_compile src\\memcodeagent\\agent.py` 通过；相关 pytest：34 passed |
-| 2026-08-28 | 开始实现 P0.3 Phase、RuntimeEvent 和 TransitionGuard | 进行中 | 待提交 | 待验证 |
+| 2026-08-28 | 完成 P0.3 第一小步：独立 `Phase`、`RuntimeEvent`、`TransitionGuard`、`StateMachine` 及转换测试 | 已完成 | 待提交 | `python -m py_compile ...` 通过；相关 pytest：36 passed |
+| 2026-08-28 | P0.3 后续：把状态机接入 AgentController，并拒绝非法工具阶段 | 待开始 | 待提交 | 待验证 |
 
 ## 每次代码修改的固定流程
 
