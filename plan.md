@@ -147,12 +147,12 @@ TEST 失败 → IMPLEMENT
 
 **目的：** 在安全性和交互效率之间取得平衡，避免每次读取都打断用户，也避免修改和危险命令无确认执行。
 
-- [ ] 用 `ToolPolicy.evaluate(phase, tool, args)` 返回 `ALLOW`、`DENY` 或 `CONFIRM`。
+- [x] 用 `ToolPolicy.evaluate(phase, tool, args)` 返回 `ALLOW`、`DENY` 或 `CONFIRM`。
 - [ ] `list_files`、`read_file`、`read_file_range`、`search_text`、摘要工具默认 `ALLOW`。
 - [ ] `write_file`、`apply_patch` 默认 `CONFIRM`。
 - [ ] `run_command` 默认 `CONFIRM`；对删除、安装依赖、覆盖文件、网络访问等命令显示更明确的风险提示。
-- [ ] 当前阶段禁止的工具直接 `DENY`，不通过确认绕过。
-- [ ] 用户拒绝后把结果反馈给模型，由模型改用其他方案或向用户说明。
+- [x] 当前阶段禁止的工具直接 `DENY`，不通过确认绕过。
+- [x] 用户拒绝后把结果反馈给模型，由模型改用其他方案或向用户说明。
 
 **完成标准：** 只读探索流畅，所有实际修改和高风险命令有明确确认点。
 
@@ -331,6 +331,7 @@ P1 的目的，是让 Agent 在较大的真实仓库中“少读、读对、读�
 | 2026-08-28 | 开始实现 P0.2 AgentController 核心循环 | 进行中 | 待提交 | 待验证 |
 | 2026-08-28 | 完成 P0.2 第一小步：独立 Controller、单步执行、状态持久化和确定性测试 | 已完成 | `81a502f` | 相关 pytest：38 passed |
 | 2026-08-28 | 完成 P0.2 第二小步：交互循环通过 Controller 获取决策并执行工具 | 部分完成 | 待提交 | `python -m py_compile ...` 通过；相关 pytest：38 passed |
+| 2026-08-28 | 完成 P0.2/P0.4 衔接：独立 `ToolPolicy`，由 Controller 统一执行 ALLOW/DENY/CONFIRM | 部分完成 | 待提交 | `python -m py_compile ...` 通过；相关 pytest：39 passed |
 
 ## 每次代码修改的固定流程
 

@@ -16,6 +16,7 @@ from memcodeagent.context_manager import ContextManager
 from memcodeagent.controller import AgentController
 from memcodeagent.llm import LlmClient
 from memcodeagent.memory.hybrid_retriever import HybridRetriever, RetrievalContext
+from memcodeagent.policy import ToolPolicy
 from memcodeagent.tools import ToolExecutor, ToolObservation
 from memcodeagent.workspace import Workspace
 
@@ -144,6 +145,10 @@ class CodingAgent:
             tool_executor=self.tools,
             context_manager=self.context_manager,
             max_steps=config.max_steps,
+            tool_policy=ToolPolicy(),
+            confirmation_callback=lambda tool_call: self._confirm_tool(
+                tool_call.name, tool_call.args
+            ),
         )
         self.verbose = False
         self.streaming_mode = False
@@ -557,46 +562,23 @@ class CodingAgent:
                     else:
                         self.console.print(f"[dim]→ calling {', '.join(tool_names)}...[/dim]")
 
-                def tool_guard(tool_call: Any) -> ToolObservation | None:
+                def tool_context(tool_call: Any) -> dict[str, Any]:
                     call_key = (
                         tool_call.name,
                         json.dumps(tool_call.args, sort_keys=True, ensure_ascii=False),
                     )
-                    if self._is_protected_test_edit(tool_call.name, tool_call.args):
-                        return ToolObservation(
-                            tool_call.name,
-                            False,
-                            "Baseline test files are protected. Add new tests in a new file, "
-                            "but do not modify tests that existed when the task started.",
-                            tool_call.id,
-                        )
-                    if not self._tool_allowed_in_phase(phase, tool_call.name, explored):
-                        return ToolObservation(
-                            tool_call.name,
-                            False,
-                            f"当前阶段“{_PHASE_LABELS.get(phase, phase)}”不允许调用 {tool_call.name}。"
-                            "请先完成项目检查，再进入实现阶段。",
-                            tool_call.id,
-                        )
-                    if call_key in seen_calls:
-                        return ToolObservation(
-                            tool_call.name,
-                            False,
-                            "Duplicate tool call suppressed; use a different path, range, query, or command.",
-                            tool_call.id,
-                        )
-                    if self._requires_approval(tool_call.name) and not self._confirm_tool(
-                        tool_call.name, tool_call.args
-                    ):
+                    duplicate = call_key in seen_calls
+                    if not duplicate:
                         seen_calls.add(call_key)
-                        return ToolObservation(
-                            tool_call.name,
-                            False,
-                            "Tool call denied by user.",
-                            tool_call.id,
-                        )
-                    seen_calls.add(call_key)
-                    return None
+                    return {
+                        "phase": phase,
+                        "approval_required": self.config.approval_required,
+                        "explored": explored,
+                        "protected_test": self._is_protected_test_edit(
+                            tool_call.name, tool_call.args
+                        ),
+                        "duplicate": duplicate,
+                    }
 
                 try:
                     if self.streaming_mode:
@@ -608,7 +590,7 @@ class CodingAgent:
                         result = self.controller.step(
                             messages,
                             before_tools=before_tools,
-                            tool_guard=tool_guard,
+                            tool_context=tool_context,
                             stream=True,
                             on_chunk=_on_chunk,
                         )
@@ -619,7 +601,7 @@ class CodingAgent:
                             result = self.controller.step(
                                 messages,
                                 before_tools=before_tools,
-                                tool_guard=tool_guard,
+                                tool_context=tool_context,
                             )
                 except RuntimeError:
                     self.console.print("[yellow]Runtime step budget exhausted.[/yellow]")

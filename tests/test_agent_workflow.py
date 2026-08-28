@@ -11,6 +11,7 @@ from memcodeagent.agent import TaskMode
 from memcodeagent.controller import AgentController
 from memcodeagent.llm import AgentDecision
 from memcodeagent.memory.hybrid_retriever import RetrievalContext
+from memcodeagent.policy import PolicyAction, ToolPolicy
 from memcodeagent.runtime import InvalidTransition, Phase, RuntimeEvent, StateMachine, TransitionGuard
 
 
@@ -101,6 +102,36 @@ def test_agent_controller_final_answer_transitions_to_done() -> None:
     assert result.finished is True
     assert controller.phase == Phase.DONE
     assert controller.last_result == "done"
+
+
+def test_tool_policy_permission_matrix() -> None:
+    policy = ToolPolicy()
+    assert policy.evaluate(
+        phase="INSPECTING",
+        tool_name="read_file",
+        approval_required=True,
+    ).action == PolicyAction.ALLOW
+    assert policy.evaluate(
+        phase="INSPECTING",
+        tool_name="apply_patch",
+        approval_required=True,
+    ).action == PolicyAction.DENY
+    assert policy.evaluate(
+        phase="IMPLEMENTING",
+        tool_name="apply_patch",
+        approval_required=True,
+    ).action == PolicyAction.CONFIRM
+    assert policy.evaluate(
+        phase="IMPLEMENTING",
+        tool_name="apply_patch",
+        approval_required=False,
+    ).action == PolicyAction.ALLOW
+    assert policy.evaluate(
+        phase="IMPLEMENTING",
+        tool_name="write_file",
+        approval_required=False,
+        protected_test=True,
+    ).action == PolicyAction.DENY
 
 
 def test_actionable_task_detection() -> None:
