@@ -296,7 +296,7 @@ class CodingAgent:
 
     def _run_loop_interactive(self, messages: list[dict[str, Any]]) -> None:
         """Core agent loop for interactive mode: uses per-error retry counter."""
-        if self._should_plan(messages) and not self._confirm_interactive_plan(messages):
+        if self._should_plan(messages) and not self._prepare_task(messages):
             return
 
         error_retry_count = 0
@@ -306,7 +306,8 @@ class CodingAgent:
         seen_calls: set[tuple[str, str]] = set()
         phase = "INSPECTING"
         pending_edits = 0
-        explored = False
+        explored = True
+        has_changes = False
 
         while True:
             for step in range(1, self.config.max_steps + 1):
@@ -359,6 +360,11 @@ class CodingAgent:
                             continue
                         phase = "VERIFYING"
                         self._print_phase(phase, step, self.config.max_steps)
+                    if has_changes:
+                        if not self._run_external_acceptance(messages):
+                            self.console.print("[yellow]外部验收未通过，任务不能标记为完成。[/yellow]")
+                            phase = "FIXING"
+                            continue
                     if not self.streaming_mode:
                         self.console.print(f"[green]{decision.content}[/green]")
                     messages.append(decision.assistant_message)
@@ -425,6 +431,7 @@ class CodingAgent:
                         code_changed = True
                         phase = "IMPLEMENTING"
                         pending_edits += 1
+                        has_changes = True
                     if observation.ok and tool_call.name in _READ_ONLY_TOOLS:
                         explored = True
 
@@ -519,6 +526,101 @@ class CodingAgent:
         self._phase = "EXPLORING"
         self._save_session(messages)
         return True
+
+    def _prepare_task(self, messages: list[dict[str, Any]]) -> bool:
+        """Explore with read-only tools, then generate and approve a grounded plan."""
+        self._phase = "EXPLORING"
+        self.console.rule("[bold cyan]探索项目")
+        exploration_instruction = {
+            "role": "system",
+            "content": (
+                f"当前 workspace 是 {self.workspace.root}。你现在处于只读探索阶段，只能调用 "
+                "list_files、read_file、search_text。请先阅读需求文档、项目说明、相关源码和现有测试，"
+                "不要修改文件、不要运行命令。每次只读取与任务直接相关的内容；读取完成后用一句话说明 "
+                "已掌握的文件和发现。"
+            ),
+        }
+        explored = False
+        for step in range(1, 5):
+            self._print_phase("EXPLORING", step, 4)
+            trimmed = self.context_manager.trim([exploration_instruction, *messages])
+            try:
+                decision = self.llm.next_action(trimmed)
+            except KeyboardInterrupt:
+                self.console.print("[yellow]探索已中断。[/yellow]")
+                return False
+            self._record_usage(decision)
+            if decision.is_final:
+                if decision.content:
+                    messages.append(decision.assistant_message)
+                    self.console.print(f"[dim]{decision.content}[/dim]")
+                break
+            messages.append(decision.assistant_message)
+            for tool_call in decision.tool_calls:
+                if tool_call.name not in _READ_ONLY_TOOLS:
+                    observation = ToolObservation(
+                        tool_call.name,
+                        False,
+                        "探索阶段只允许读取和搜索，暂不执行修改或命令。",
+                        tool_call.id,
+                    )
+                else:
+                    try:
+                        observation = self.tools.execute(tool_call.name, tool_call.args, tool_call.id)
+                    except KeyboardInterrupt:
+                        self.console.print("[yellow]探索已中断。[/yellow]")
+                        return False
+                    explored = explored or observation.ok
+                self.console.print(
+                    f"[dim]  {'✓' if observation.ok else '✗'} {observation.tool_name}"
+                    f"{self._tool_target(observation.tool_name, tool_call.args)}[/dim]"
+                )
+                messages.append(observation.to_message())
+        if not explored:
+            self.console.print("[yellow]未获得有效的项目探索结果，任务暂停。[/yellow]")
+            return False
+        return self._confirm_interactive_plan(messages)
+
+    def _run_external_acceptance(self, messages: list[dict[str, Any]]) -> bool:
+        """Run repository-independent acceptance checks when available."""
+        verifier = Path(__file__).resolve().parents[2] / "scripts" / "evaluate_ticketdesk.py"
+        if not verifier.exists() or not (self.workspace.root / "ticketdesk").is_dir():
+            return True
+        self.console.print("[dim]运行外部验收：evaluate_ticketdesk.py[/dim]")
+        try:
+            observation = self.tools.execute(
+                "run_command",
+                {"command": f'python "{verifier}" "{self.workspace.root}"'},
+                tool_call_id=None,
+            )
+        except KeyboardInterrupt:
+            self.console.print("[yellow]外部验收已中断。[/yellow]")
+            return False
+        self.console.print(observation.to_display() if self.verbose else f"[dim]  {'✓' if observation.ok else '✗'} external acceptance[/dim]")
+        messages.append({"role": "user", "content": f"External acceptance: {'PASSED' if observation.ok else 'FAILED'}\n{observation.content}"})
+        return observation.ok and "隐藏验收通过" in observation.content
+
+    def _record_usage(self, decision: Any) -> None:
+        usage = getattr(decision, "usage", None)
+        if not usage:
+            return
+        self.session_prompt_tokens += getattr(usage, "prompt_tokens", 0)
+        self.session_completion_tokens += getattr(usage, "completion_tokens", 0)
+        self.session_total_tokens += getattr(usage, "total_tokens", 0)
+        self.console.print(
+            f"[dim]Tokens: {getattr(usage, 'total_tokens', 0):,} "
+            f"(prompt: {getattr(usage, 'prompt_tokens', 0):,}, "
+            f"completion: {getattr(usage, 'completion_tokens', 0):,}) | "
+            f"Session total: {self.session_total_tokens:,}[/dim]"
+        )
+
+    @staticmethod
+    def _tool_target(name: str, args: dict[str, Any]) -> str:
+        if name in {"read_file", "list_files"}:
+            return f" [{args.get('path') or args.get('glob') or ''}]"
+        if name == "search_text":
+            return f" [{args.get('query', '')}]"
+        return ""
 
     @staticmethod
     def _tool_allowed_in_phase(phase: str, tool_name: str, explored: bool) -> bool:
