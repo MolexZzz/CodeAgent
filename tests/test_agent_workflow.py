@@ -5,11 +5,12 @@ from memcodeagent.agent import AgentConfig
 
 
 def test_phase_tool_permissions() -> None:
-    read = {"list_files", "read_file", "search_text"}
+    read = {"list_files", "read_file", "search_text", "summarize_tree", "diff_summary"}
     assert all(CodingAgent._tool_allowed_in_phase("EXPLORING", name, False) for name in read)
     assert not CodingAgent._tool_allowed_in_phase("EXPLORING", "apply_patch", False)
     assert CodingAgent._tool_allowed_in_phase("IMPLEMENTING", "apply_patch", True)
     assert CodingAgent._tool_allowed_in_phase("TESTING", "run_command", True)
+    assert CodingAgent._tool_allowed_in_phase("VERIFYING", "diff_summary", True)
     assert not CodingAgent._tool_allowed_in_phase("COMPLETED", "read_file", True)
 
 

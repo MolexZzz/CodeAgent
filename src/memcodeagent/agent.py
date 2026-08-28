@@ -37,7 +37,7 @@ class AgentConfig:
 
 # Tools that modify code on disk and should trigger a verification test run.
 _CODE_EDIT_TOOLS = {"write_file", "apply_patch"}
-_READ_ONLY_TOOLS = {"list_files", "read_file", "search_text"}
+_READ_ONLY_TOOLS = {"list_files", "read_file", "search_text", "summarize_tree", "diff_summary"}
 _PHASE_LABELS = {
     "PLANNING": "制定计划",
     "EXPLORING": "检查项目",
@@ -292,7 +292,7 @@ class CodingAgent:
         status = "PASSED" if passed else "FAILED"
         summary = (
             f"Automated test verification after code edit: {status}.\n"
-            f"{observation.content}"
+            f"{self._summarize_test_output(observation.content)}"
         )
         messages.append({"role": "user", "content": summary})
         return not passed  # Return True if tests failed
@@ -368,6 +368,10 @@ class CodingAgent:
                             self.console.print("[yellow]外部验收未通过，任务不能标记为完成。[/yellow]")
                             phase = "FIXING"
                             continue
+                    if not self._final_completion_checks(messages):
+                        self.console.print("[yellow]最终完成条件未满足，任务继续。[/yellow]")
+                        phase = "FIXING"
+                        continue
                     if not self.streaming_mode:
                         self.console.print(f"[green]{decision.content}[/green]")
                     messages.append(decision.assistant_message)
@@ -596,6 +600,7 @@ class CodingAgent:
 
     def _run_external_acceptance(self, messages: list[dict[str, Any]]) -> bool:
         """Run repository-independent acceptance checks when available."""
+        self._print_diff_summary(messages)
         if not self.config.acceptance_command:
             return True
         command = self.config.acceptance_command.replace("{workspace}", str(self.workspace.root))
@@ -612,6 +617,21 @@ class CodingAgent:
         self.console.print(observation.to_display() if self.verbose else f"[dim]  {'✓' if observation.ok else '✗'} external acceptance[/dim]")
         messages.append({"role": "user", "content": f"External acceptance: {'PASSED' if observation.ok else 'FAILED'}\n{observation.content}"})
         return observation.ok
+
+    def _print_diff_summary(self, messages: list[dict[str, Any]]) -> None:
+        observation = self.tools.execute("diff_summary", {}, tool_call_id=None)
+        if observation.ok and "No git repository found" not in observation.content:
+            self.console.print("[dim]  ✓ diff summary[/dim]")
+            messages.append({"role": "user", "content": f"Final diff summary:\n{observation.content}"})
+
+    def _final_completion_checks(self, messages: list[dict[str, Any]]) -> bool:
+        if self.config.acceptance_command:
+            return True
+        diff_obs = self.tools.execute("diff_summary", {}, tool_call_id=None)
+        if not diff_obs.ok:
+            return False
+        messages.append({"role": "user", "content": f"Completion diff summary:\n{diff_obs.content}"})
+        return True
 
     def _snapshot_test_files(self) -> set[str]:
         files: list[Path] = []
@@ -647,8 +667,25 @@ class CodingAgent:
         )
 
     @staticmethod
+    def _summarize_test_output(content: str, limit: int = 2000) -> str:
+        lines = content.splitlines()
+        interesting = [
+            line for line in lines
+            if (
+                "FAILED " in line
+                or "ERROR " in line
+                or "passed" in line
+                or "failed" in line
+                or "exit_code=" in line
+                or line.strip().startswith(("E   ", ">"))
+            )
+        ]
+        text = "\n".join(interesting or lines[-40:])
+        return text if len(text) <= limit else text[:limit] + "\n...[test output shortened]"
+
+    @staticmethod
     def _tool_target(name: str, args: dict[str, Any]) -> str:
-        if name in {"read_file", "list_files"}:
+        if name in {"read_file", "list_files", "summarize_tree"}:
             return f" [{args.get('path') or args.get('glob') or ''}]"
         if name == "search_text":
             return f" [{args.get('query', '')}]"
@@ -663,7 +700,7 @@ class CodingAgent:
         if phase in {"IMPLEMENTING", "FIXING"}:
             return tool_name in _READ_ONLY_TOOLS | _CODE_EDIT_TOOLS | {"run_command"}
         if phase in {"TESTING", "VERIFYING"}:
-            return tool_name in _READ_ONLY_TOOLS | {"run_command"}
+            return tool_name in {"read_file", "search_text", "diff_summary", "run_command"}
         return True
 
     @staticmethod

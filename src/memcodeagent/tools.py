@@ -79,6 +79,21 @@ class ToolExecutor:
                 break
         return "\n".join(paths) or "(no files)"
 
+    def _tool_summarize_tree(self, max_files: int = 120) -> str:
+        """Return a compact repository tree summary for planning."""
+        entries: list[str] = []
+        count = 0
+        for path in sorted(self.workspace.root.rglob("*")):
+            if count >= max_files:
+                entries.append(f"... [truncated after {max_files} files]")
+                break
+            if not path.is_file() or self.workspace.should_ignore(path):
+                continue
+            rel = path.relative_to(self.workspace.root).as_posix()
+            entries.append(f"{rel} ({path.stat().st_size} bytes)")
+            count += 1
+        return "\n".join(entries) or "(no files)"
+
     def _tool_read_file(self, path: str, start_line: int | None = None, end_line: int | None = None) -> str:
         file_path = self.workspace.resolve_inside(path)
         lines = file_path.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -121,6 +136,29 @@ class ToolExecutor:
                 "\n... [search output truncated; narrow the glob or query]"
             )
         return output or "(no matches)"
+
+    def _tool_diff_summary(self) -> str:
+        """Return a generic git diff summary when the workspace is a git repo."""
+        if not (self.workspace.root / ".git").exists():
+            return "No git repository found; diff summary is unavailable."
+        stat = subprocess.run(
+            "git diff --stat",
+            cwd=self.workspace.root,
+            shell=True,
+            capture_output=True,
+            timeout=20,
+        )
+        names = subprocess.run(
+            "git diff --name-status",
+            cwd=self.workspace.root,
+            shell=True,
+            capture_output=True,
+            timeout=20,
+        )
+        code = stat.returncode or names.returncode
+        stdout = self._decode_output(stat.stdout) + "\n" + self._decode_output(names.stdout)
+        stderr = self._decode_output(stat.stderr) + self._decode_output(names.stderr)
+        return f"exit_code={code}\nSTDOUT:\n{stdout.strip() or '(no changes)'}\nSTDERR:\n{stderr}"[-6000:]
 
     def _tool_write_file(self, path: str, content: str, overwrite: bool = False) -> str:
         if self.dry_run:

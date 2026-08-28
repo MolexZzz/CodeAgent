@@ -118,6 +118,9 @@ export MEMCODE_MODEL="qwen2.5-coder"
 - **原生 LLM 工具调用**：使用 OpenAI function-calling API，支持 6 个工具（list_files、read_file、search_text、write_file、apply_patch、run_command）
 - **自行实现的 agent 循环**：对话管理、工具分发、终止条件、错误处理
 - **本地工具执行**：所有文件/命令操作在本地运行，带工作区路径验证和危险命令拦截
+- **仓库级工作流**：交互模式包含只读探索、计划确认、实现、测试、修复和最终验收阶段
+- **测试保护**：默认保护任务开始前已有的测试文件，避免通过削弱测试制造成功
+- **变更审查**：提供目录摘要和 git diff 摘要工具，帮助控制上下文和最终总结
 - **轻量级记忆**：任务历史持久化到 `.memcode/memory.json`，通过 token 重叠评分检索（无向量数据库）
 - **多编辑补丁**：`apply_patch` 支持多个顺序替换，输出统一 diff
 - **Typer CLI**：`mca run <任务>` 命令，支持工作区选择、步数限制和 dry-run 模式

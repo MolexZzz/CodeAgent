@@ -10,6 +10,20 @@ def make_executor(tmp_path: Path) -> ToolExecutor:
     return ToolExecutor(Workspace(tmp_path))
 
 
+def test_summarize_tree_returns_compact_file_list(tmp_path: Path) -> None:
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "app.py").write_text("print('hi')", encoding="utf-8")
+    observation = make_executor(tmp_path).execute("summarize_tree", {"max_files": 10})
+    assert observation.ok
+    assert "pkg/app.py" in observation.content
+
+
+def test_diff_summary_handles_non_git_workspace(tmp_path: Path) -> None:
+    observation = make_executor(tmp_path).execute("diff_summary", {})
+    assert observation.ok
+    assert "No git repository found" in observation.content
+
+
 def test_write_file_creates_new_file(tmp_path: Path) -> None:
     executor = make_executor(tmp_path)
     observation = executor.execute("write_file", {"path": "hello.py", "content": "print('hi')\n"})

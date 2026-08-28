@@ -31,6 +31,19 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "summarize_tree",
+            "description": "Return a compact summary of files in the workspace tree with sizes.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "max_files": {"type": "integer", "description": "Maximum number of files to include."},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "read_file",
             "description": (
                 "Read a bounded section of a text file inside the workspace, with line numbers. "
@@ -131,6 +144,14 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 },
                 "required": ["command"],
             },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "diff_summary",
+            "description": "Return a git diff summary and changed file list for the current workspace.",
+            "parameters": {"type": "object", "properties": {}},
         },
     },
 ]
