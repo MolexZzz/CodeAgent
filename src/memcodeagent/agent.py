@@ -283,14 +283,21 @@ class CodingAgent:
 
     def _run_loop_interactive(self, messages: list[dict[str, Any]]) -> None:
         """Core agent loop for interactive mode: uses per-error retry counter."""
+        if self._should_plan(messages) and not self._confirm_interactive_plan(messages):
+            return
+
         error_retry_count = 0
         last_error_detected = False
         self._stop_requested = False
         continuation_count = 0
         seen_calls: set[tuple[str, str]] = set()
+        phase = "INSPECTING"
 
         while True:
             for step in range(1, self.config.max_steps + 1):
+                if step == 1:
+                    phase = "INSPECTING"
+                self._print_phase(phase, step, self.config.max_steps)
                 trimmed = self.context_manager.trim(messages)
                 if self.context_manager.last_trim_notice:
                     self.console.print(f"[yellow]{self.context_manager.last_trim_notice}[/yellow]")
@@ -376,11 +383,14 @@ class CodingAgent:
 
                     if observation.ok and tool_call.name in _CODE_EDIT_TOOLS:
                         code_changed = True
+                        phase = "IMPLEMENTING"
 
                 if code_changed:
+                    phase = "TESTING"
                     test_failed = self._run_verification_tests(messages)
                     if test_failed:
                         current_step_has_error = True
+                        phase = "FIXING"
 
                 if current_step_has_error:
                     if last_error_detected:
@@ -411,6 +421,83 @@ class CodingAgent:
                 return
             continuation_count += 1
             self.console.print(f"[cyan]Continuing with budget {continuation_count}/{self.config.max_continuations}...[/cyan]")
+
+    def _confirm_interactive_plan(self, messages: list[dict[str, Any]]) -> bool:
+        """Force a tool-free planning turn before repository changes begin."""
+        plan_instruction = {
+            "role": "system",
+            "content": (
+                "You are in the planning phase for a repository task. Do not call tools. "
+                "Return a concise plan with: (1) understood goal, (2) likely files/modules "
+                "to inspect or change, (3) implementation order, (4) verification command, "
+                "and (5) risks or compatibility concerns. Do not claim anything was inspected "
+                "unless it is already present in the conversation."
+            ),
+        }
+        try:
+            try:
+                decision = self.llm.next_action([plan_instruction, *messages], tools_enabled=False)
+            except TypeError:
+                decision = self.llm.next_action([plan_instruction, *messages])
+        except KeyboardInterrupt:
+            self.console.print("[yellow]Planning interrupted.[/yellow]")
+            return False
+
+        self.console.rule("[bold cyan]Plan")
+        self.console.print(decision.content or "(No plan returned.)")
+        self.console.print("[dim]No files or commands have been changed during planning.[/dim]")
+        try:
+            approved = questionary.confirm("开始按这个计划执行？", default=True).ask()
+        except (KeyboardInterrupt, EOFError):
+            approved = False
+        if not approved:
+            self.console.print("[dim]Plan accepted? No. Task remains unchanged.[/dim]")
+            return False
+
+        # Keep the approved plan in the conversation so later tool decisions
+        # can follow the same outline without relying on hidden state.
+        if decision.content:
+            messages.append({"role": "assistant", "content": f"计划：\n{decision.content}"})
+        messages.append({"role": "user", "content": "计划已确认。现在开始执行，按计划检查、修改并验证项目。"})
+        self._save_session(messages)
+        return True
+
+    @staticmethod
+    def _should_plan(messages: list[dict[str, Any]]) -> bool:
+        """Use the approval gate for actionable tasks, not short chat replies."""
+        user_messages = [
+            str(message.get("content") or "")
+            for message in messages
+            if message.get("role") == "user"
+        ]
+        if not user_messages:
+            return False
+        latest = user_messages[-1].strip().lower()
+        conversational = {
+            "你好", "hello", "hi", "谢谢", "thanks", "谢谢你",
+            "继续", "继续吧", "可以", "好的", "ok",
+        }
+        if latest in conversational:
+            return False
+        action_words = (
+            "改", "修", "实现", "增加", "删除", "重构", "测试", "运行",
+            "检查", "分析", "开发", "修改", "fix", "implement", "refactor",
+            "test", "run", "debug", "add", "change",
+        )
+        return len(latest) >= 12 or any(word in latest for word in action_words)
+
+    def _print_phase(self, phase: str, step: int, limit: int) -> None:
+        labels = {
+            "INSPECTING": "检查项目",
+            "IMPLEMENTING": "实现修改",
+            "TESTING": "运行验证",
+            "FIXING": "修复失败",
+            "COMPLETING": "整理结果",
+        }
+        self.console.print(
+            f"[cyan]阶段：{labels.get(phase, phase)}[/cyan] "
+            f"[dim]步骤 {step}/{limit}[/dim]"
+        )
 
     def _requires_approval(self, tool_name: str) -> bool:
         """Require confirmation only for operations that can change state."""
