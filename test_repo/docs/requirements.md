@@ -32,6 +32,15 @@ Please prepare the next release of TicketDesk:
 
 - Existing tests continue to pass.
 - A user can only list, view, close, or reopen their own tickets; `admin` can
-  manage all tickets.
+manage all tickets.
+
+## Known issues in the current release
+
+The current release is intentionally incomplete for maintenance practice:
+
+- status filtering is incorrect in the inbox;
+- the requested sorting, pagination, and reopen capabilities do not exist;
+- validation rules are duplicated between layers;
+- regression coverage for these behaviors is missing.
 - No unrelated files are changed.
 - The final test command exits successfully.
