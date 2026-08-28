@@ -643,8 +643,14 @@ class CodingAgent:
                                 tool_context=tool_context,
                             )
                 except RuntimeError:
-                    self.console.print("[yellow]Runtime step budget exhausted.[/yellow]")
+                    self.controller.mark_budget_exhausted()
+                    self._print_agent_event(
+                        AgentEventKind.PAUSED,
+                        "任务尚未完成，已暂停",
+                        f"已执行 {self.config.max_steps}/{self.config.max_steps} 步；可继续执行",
+                    )
                     self._phase = "PAUSED"
+                    self._save_session(messages)
                     return
 
                 if result.interrupted:
@@ -772,7 +778,8 @@ class CodingAgent:
                         error_retry_count = 0
                         last_error_detected = False
 
-            self.console.print(f"[yellow]Paused after {step} agent steps ({self.config.max_steps}-step budget reached).[/yellow]")
+            self.controller.mark_budget_exhausted()
+            self.console.print(f"[yellow]任务尚未完成，已暂停。已执行 {step}/{self.config.max_steps} 步。[/yellow]")
             self._phase = "PAUSED"
             if continuation_count >= self.config.max_continuations:
                 self.console.print("[dim]Continuation limit reached. Task paused; start a new message to continue.[/dim]")
