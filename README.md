@@ -46,6 +46,9 @@ export MEMCODE_MODEL="gpt-4o-mini"
 运行：
 
 ```bash
+# 直接进入交互式 Agent（等价于 mca chat）
+mca
+
 # 单次任务执行
 mca run "阅读这个项目并总结下一步实现方向"
 
@@ -68,7 +71,7 @@ mca chat
 **DeepSeek:**
 ```bash
 export OPENAI_API_KEY="your-deepseek-key"
-export OPENAI_BASE_URL="https://api.deepseek.com/v1"
+export OPENAI_BASE_URL="https://api.deepseek.com"
 export MEMCODE_MODEL="deepseek-chat"
 ```
 
@@ -113,6 +116,18 @@ export MEMCODE_MODEL="qwen2.5-coder"
 - **多编辑补丁**：`apply_patch` 支持多个顺序替换，输出统一 diff
 - **Typer CLI**：`mca run <任务>` 命令，支持工作区选择、步数限制和 dry-run 模式
 - **全面测试**：29 个单元测试覆盖工具执行、记忆持久化/检索和 LLM 消息解析
+
+### 可控工作流
+
+- 交互式 `mca chat` 默认在每次工具调用前请求确认，可用 `--no-approve` 关闭。
+- Agent 循环受 `--max-steps` 硬上限约束，按 `Ctrl-C` 可中断当前请求；中断不会继续执行后续工具。
+- `/plan [任务]` 只生成实施方案，不提供工具权限，也不会修改文件。
+- 会话消息在每轮自动保存到工作区 `.memcode/session.json`，重新进入 `chat` 会恢复；`/save` 可手动保存，`/clear` 会同步清空持久化会话。
+- `/context` 显示滑动窗口统计；发生压缩时会提示保留完整历史但仅发送近期上下文。`/cache` 显示摘要缓存和会话文件状态。
+
+### 课程要求核对
+
+本项目自行实现了对话历史与上下文裁剪、摘要压缩、原生 tool calling 输出解析、工具注册与本地执行、工作区路径校验、命令安全检查、重试与终止条件、错误观察回传和 JSON 记忆持久化。仅使用模型厂商 API 客户端库，没有使用 LangChain、LlamaIndex、OpenAI Agents SDK、Claude Agent SDK、AutoGen、CrewAI 等 Agent 框架，也没有使用服务端托管的文件或代码执行工具。
 
 ## 安全说明
 

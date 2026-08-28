@@ -181,6 +181,11 @@ class LlmClient:
             "api_key_env": "DEEPSEEK_API_KEY",
             "base_url_env": "DEEPSEEK_BASE_URL",
         },
+        "deepseek-v4-flash": {
+            "provider": "DeepSeek",
+            "api_key_env": "DEEPSEEK_API_KEY",
+            "base_url_env": "DEEPSEEK_BASE_URL",
+        },
         "gpt-4o": {
             "provider": "OpenAI",
             "api_key_env": "OPENAI_API_KEY",
@@ -293,6 +298,7 @@ class LlmClient:
         messages: list[dict[str, Any]],
         stream: bool = False,
         on_chunk: Callable[[str], None] | None = None,
+        tools_enabled: bool = True,
     ) -> AgentDecision:
         api_key, base_url = self._resolve_credentials(self.model)
         self.api_key, self.base_url = api_key, base_url
@@ -319,8 +325,8 @@ class LlmClient:
         response = client.chat.completions.create(
             model=self.model,
             messages=messages,
-            tools=TOOL_SCHEMAS,
-            tool_choice="auto",
+            tools=TOOL_SCHEMAS if tools_enabled else None,
+            tool_choice="auto" if tools_enabled else "none",
             temperature=0.2,
         )
         message = response.choices[0].message

@@ -9,6 +9,20 @@ app = typer.Typer(help="MemCodeAgent: a lightweight CLI coding agent.")
 console = Console()
 
 
+@app.callback(invoke_without_command=True)
+def main(
+    ctx: typer.Context,
+    workspace: Path = typer.Option(Path.cwd(), "--workspace", "-w", help="Workspace root for the default chat."),
+    max_steps: int = typer.Option(8, "--max-steps", help="Maximum steps per continuation budget."),
+    approve: bool = typer.Option(True, "--approve/--no-approve", help="Ask before file edits and commands."),
+) -> None:
+    """Enter the interactive agent when no subcommand is provided."""
+    if ctx.invoked_subcommand is None:
+        config = AgentConfig(workspace=workspace.resolve(), max_steps=max_steps, approval_required=approve)
+        agent = CodingAgent(config=config, console=console)
+        agent.chat()
+
+
 @app.command()
 def run(
     task: str = typer.Argument(..., help="Programming task for the agent."),
@@ -30,9 +44,10 @@ def chat(
     max_steps: int = typer.Option(8, "--max-steps", help="Deprecated: use --max-error-retries instead."),
     max_error_retries: int = typer.Option(10, "--max-error-retries", help="Maximum retry attempts per error."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Plan without writing files or running commands."),
+    approve: bool = typer.Option(True, "--approve/--no-approve", help="Ask before each tool call."),
 ) -> None:
     """Start an interactive chat session with the coding agent."""
-    config = AgentConfig(workspace=workspace.resolve(), max_steps=max_steps, max_error_retries=max_error_retries, dry_run=dry_run)
+    config = AgentConfig(workspace=workspace.resolve(), max_steps=max_steps, max_error_retries=max_error_retries, dry_run=dry_run, approval_required=approve)
     agent = CodingAgent(config=config, console=console)
     agent.chat()
 

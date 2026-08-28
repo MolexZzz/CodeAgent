@@ -48,6 +48,8 @@ class ContextManager:
     enable_summarization: bool = True
     llm_client: "LlmClient | None" = None
     _summary_cache: str | None = None  # Cached summary of previously dropped turns
+    _summary_dropped_count: int = 0
+    last_trim_notice: str | None = None
 
     def trim(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Return a trimmed copy of `messages` for sending to the model.
@@ -75,9 +77,23 @@ class ContextManager:
 
         # Generate summary if turns were dropped
         dropped_turn_count = original_turn_count - len(turns)
+        self.last_trim_notice = None
+        if dropped_turn_count > 0:
+            self.last_trim_notice = (
+                f"Context compressed: {dropped_turn_count} older turn(s) omitted from this request; "
+                "full history remains available."
+            )
         summary_msg = None
-        if dropped_turn_count > 0 and self.enable_summarization and self.llm_client:
+        if (
+            dropped_turn_count > 0
+            and dropped_turn_count != self._summary_dropped_count
+            and self.enable_summarization
+            and self.llm_client
+        ):
             summary_msg = self._get_or_create_summary(messages, len(turns))
+            self._summary_dropped_count = dropped_turn_count
+        elif dropped_turn_count > 0 and self._summary_cache:
+            summary_msg = {"role": "system", "content": f"[Context from earlier conversation turns:]\n{self._summary_cache}"}
 
         trimmed_rest = [msg for turn in turns for msg in turn]
 
@@ -91,7 +107,13 @@ class ContextManager:
         system_msgs = [m for m in messages if m.get("role") == "system"]
         rest = [m for m in messages if m.get("role") != "system"]
         turns = self._split_into_turns(rest)
-        trimmed = self.trim(messages)
+        # Stats must be side-effect free: do not invoke an extra summarization LLM call.
+        summarize = self.enable_summarization
+        self.enable_summarization = False
+        try:
+            trimmed = self.trim(messages)
+        finally:
+            self.enable_summarization = summarize
         return {
             "total_messages": len(messages),
             "total_turns": len(turns),

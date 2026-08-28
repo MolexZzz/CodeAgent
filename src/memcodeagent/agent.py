@@ -13,7 +13,7 @@ from rich.status import Status
 from memcodeagent.context_manager import ContextManager
 from memcodeagent.llm import LlmClient
 from memcodeagent.memory.hybrid_retriever import HybridRetriever, RetrievalContext
-from memcodeagent.tools import ToolExecutor
+from memcodeagent.tools import ToolExecutor, ToolObservation
 from memcodeagent.workspace import Workspace
 
 
@@ -28,6 +28,7 @@ class AgentConfig:
     max_tool_retries: int = 2
     run_tests_after_edit: bool = True
     test_command: str | None = None  # None = auto-detect (pytest if a tests/ dir exists)
+    approval_required: bool = False
 
 
 # Tools that modify code on disk and should trigger a verification test run.
@@ -56,6 +57,8 @@ class CodingAgent:
         self.session_prompt_tokens = 0
         self.session_completion_tokens = 0
         self.session_total_tokens = 0
+        self._session_path = self.workspace.root / ".memcode" / "session.json"
+        self._stop_requested = False
 
     def run(self, task: str) -> str:
         """Single-turn execution: retrieve context, run agent loop, persist memory."""
@@ -73,14 +76,18 @@ class CodingAgent:
         self.console.print("[bold cyan]MemCodeAgent REPL[/bold cyan]")
         self.console.print(f"model={self.llm.model}  workspace={self.workspace.root}")
         self.console.print("Type /help to see available commands.")
+        if self.config.approval_required:
+            self.console.print("[dim]Read-only tools run automatically; file edits and commands require approval.[/dim]")
         self.console.print()
 
-        messages = self._initial_messages_chat()
+        messages = self._load_session() or self._initial_messages_chat()
+        if len(messages) > 1:
+            self.console.print("[dim]Resumed persisted session from .memcode/session.json[/dim]")
 
         # Setup autocomplete for slash commands
         slash_commands = [
             "/help", "/exit", "/quit", "/clear", "/history",
-            "/model", "/models", "/verbose", "/workspace", "/context", "/tokens", "/streaming"
+            "/model", "/models", "/verbose", "/workspace", "/context", "/tokens", "/streaming", "/plan", "/cache", "/save"
         ]
         completer = WordCompleter(slash_commands, ignore_case=True, sentence=True)
         session = PromptSession(completer=completer)
@@ -99,6 +106,7 @@ class CodingAgent:
                 break
             elif user_input == "/clear":
                 messages = self._initial_messages_chat()
+                self._save_session(messages)
                 self.console.print("[yellow]Conversation cleared.[/yellow]")
                 continue
             elif user_input == "/history":
@@ -128,13 +136,26 @@ class CodingAgent:
             elif user_input == "/tokens":
                 self._print_token_stats()
                 continue
+            elif user_input == "/cache":
+                self._print_cache_stats(messages)
+                continue
+            elif user_input == "/save":
+                self._save_session(messages)
+                self.console.print("[green]Session saved.[/green]")
+                continue
+            elif user_input.startswith("/plan"):
+                request = user_input[5:].strip() or "Provide a plan for the current conversation request."
+                self._run_plan(request, messages)
+                continue
             elif user_input.startswith("/"):
                 self.console.print(f"[red]Unknown command: {user_input}[/red] (type /help for a list)")
                 continue
 
             # Regular user message: add to conversation and run agent loop.
             messages.append({"role": "user", "content": user_input})
+            self._save_session(messages)
             self._run_loop_interactive(messages)
+            self._save_session(messages)
 
     def _run_loop(self, messages: list[dict[str, Any]], task: str) -> str:
         """Core agent loop for single-turn mode: uses per-error retry counter.
@@ -147,14 +168,20 @@ class CodingAgent:
         last_error_detected = False
         step = 0
 
-        while True:
+        while step < self.config.max_steps:
             step += 1
             self.console.rule(f"[bold blue]Step {step}")
             trimmed = self.context_manager.trim(messages)
-            decision = self.llm.next_action(trimmed)
+            try:
+                decision = self.llm.next_action(trimmed)
+            except KeyboardInterrupt:
+                final = "Interrupted by user. No further tool calls were executed."
+                self.retriever.remember_task(task, final)
+                return final
             self.console.print(decision.to_display())
 
             messages.append(decision.assistant_message)
+            self._save_session(messages)
 
             if decision.is_final:
                 self.retriever.remember_task(task, decision.content or "(empty response)")
@@ -165,7 +192,12 @@ class CodingAgent:
             current_step_has_error = False
 
             for tool_call in decision.tool_calls:
-                observation = self.tools.execute(tool_call.name, tool_call.args, tool_call.id)
+                try:
+                    observation = self.tools.execute(tool_call.name, tool_call.args, tool_call.id)
+                except KeyboardInterrupt:
+                    final = "Interrupted by user during tool execution."
+                    self.retriever.remember_task(task, final)
+                    return final
                 self.console.print(observation.to_display())
                 messages.append(observation.to_message())
                 self.retriever.record_tool_result(tool_call.name, observation.ok, tool_call.args, observation.content)
@@ -207,6 +239,9 @@ class CodingAgent:
                     self.console.print(f"[green]✓ Error fixed after {error_retry_count} attempt(s). Counter reset.[/green]")
                     error_retry_count = 0
                     last_error_detected = False
+        final = f"Stopped after reaching the maximum of {self.config.max_steps} agent steps."
+        self.retriever.remember_task(task, final)
+        return final
 
     def _resolve_test_command(self) -> str | None:
         """Pick the test command to run after a code edit, or None if tests are disabled/absent."""
@@ -247,9 +282,13 @@ class CodingAgent:
         last_error_detected = False
         step = 0
 
-        while True:
+        self._stop_requested = False
+        step_limit = self.config.max_steps
+        while step < step_limit:
             step += 1
             trimmed = self.context_manager.trim(messages)
+            if self.context_manager.last_trim_notice:
+                self.console.print(f"[yellow]{self.context_manager.last_trim_notice}[/yellow]")
 
             if self.streaming_mode:
                 # Stream tokens to the terminal as they arrive instead of blocking silently.
@@ -258,13 +297,21 @@ class CodingAgent:
                 def _on_chunk(text: str) -> None:
                     print(text, end="", flush=True)
 
-                decision = self.llm.next_action(trimmed, stream=True, on_chunk=_on_chunk)
+                try:
+                    decision = self.llm.next_action(trimmed, stream=True, on_chunk=_on_chunk)
+                except KeyboardInterrupt:
+                    self.console.print("[yellow]Interrupted by user.[/yellow]")
+                    return
                 if decision.content:
                     print()  # newline after streamed content
             else:
                 # Show spinner during LLM call
                 with Status("[cyan]Thinking...[/cyan]", console=self.console):
-                    decision = self.llm.next_action(trimmed)
+                    try:
+                        decision = self.llm.next_action(trimmed)
+                    except KeyboardInterrupt:
+                        self.console.print("[yellow]Interrupted by user.[/yellow]")
+                        return
 
             # Update session token counters
             self.session_prompt_tokens += decision.usage.prompt_tokens
@@ -295,19 +342,28 @@ class CodingAgent:
                 self.console.print(f"[dim]→ calling {', '.join(tool_names)}...[/dim]")
 
             messages.append(decision.assistant_message)
+            self._save_session(messages)
 
             # Execute all tool calls and collect observations.
             code_changed = False
             current_step_has_error = False
 
             for tool_call in decision.tool_calls:
-                observation = self.tools.execute(tool_call.name, tool_call.args, tool_call.id)
+                if self._requires_approval(tool_call.name) and not self._confirm_tool(tool_call.name, tool_call.args):
+                    observation = ToolObservation(tool_call.name, False, "Tool call denied by user.", tool_call.id)
+                else:
+                    try:
+                        observation = self.tools.execute(tool_call.name, tool_call.args, tool_call.id)
+                    except KeyboardInterrupt:
+                        self.console.print("[yellow]Interrupted during tool execution.[/yellow]")
+                        return
                 if self.verbose:
                     self.console.print(observation.to_display())
                 else:
                     status_icon = "✓" if observation.ok else "✗"
                     self.console.print(f"[dim]  {status_icon} {observation.tool_name}[/dim]")
                 messages.append(observation.to_message())
+                self._save_session(messages)
 
                 if not observation.ok:
                     current_step_has_error = True
@@ -340,6 +396,81 @@ class CodingAgent:
                     self.console.print(f"[green]✓ Error fixed after {error_retry_count} attempt(s). Counter reset.[/green]")
                     error_retry_count = 0
                     last_error_detected = False
+        self.console.print(f"[yellow]Paused after {step} agent steps ({self.config.max_steps}-step budget reached).[/yellow]")
+        try:
+            continue_work = questionary.confirm("Task may be incomplete. Continue for another step budget?", default=False).ask()
+        except (KeyboardInterrupt, EOFError):
+            continue_work = False
+        if continue_work:
+            self.console.print("[cyan]Continuing with a new step budget...[/cyan]")
+            self._run_loop_interactive(messages)
+        else:
+            self.console.print("[dim]Task paused. No further tools will be executed.[/dim]")
+
+    def _requires_approval(self, tool_name: str) -> bool:
+        """Require confirmation only for operations that can change state."""
+        return self.config.approval_required and tool_name in {"write_file", "apply_patch", "run_command"}
+
+    def _confirm_tool(self, name: str, args: dict[str, Any]) -> bool:
+        try:
+            answer = questionary.confirm(
+                f"Approve {self._tool_summary(name, args)}?",
+                default=False,
+            ).ask()
+            return bool(answer)
+        except (KeyboardInterrupt, EOFError):
+            self._stop_requested = True
+            return False
+
+    @staticmethod
+    def _tool_summary(name: str, args: dict[str, Any]) -> str:
+        """Keep approval prompts readable while retaining the actionable details."""
+        if name == "write_file":
+            path = args.get("path", "<unknown>")
+            size = len(args.get("content", ""))
+            mode = "overwrite" if args.get("overwrite") else "create"
+            return f"write_file ({mode}) {path} [{size:,} chars]"
+        if name == "apply_patch":
+            path = args.get("path", "<unknown>")
+            edits = args.get("edits") or []
+            return f"apply_patch {path} [{len(edits)} edit(s)]"
+        if name == "run_command":
+            command = " ".join(str(args.get("command", "")).split())
+            if len(command) > 160:
+                command = command[:157] + "..."
+            return f"run_command: {command}"
+        return name
+
+    def _run_plan(self, request: str, messages: list[dict[str, Any]]) -> None:
+        plan_messages = [
+            {"role": "system", "content": "You are in PLAN-ONLY mode. Analyze the request and provide an ordered implementation plan, risks, files to inspect, and verification steps. Do not call tools or modify files."},
+            {"role": "user", "content": request},
+        ]
+        try:
+            decision = self.llm.next_action(plan_messages, tools_enabled=False)
+        except TypeError:
+            decision = self.llm.next_action(plan_messages)
+        self.console.rule("[bold cyan]Plan (no changes made)")
+        self.console.print(decision.content or "(no plan returned)")
+
+    def _save_session(self, messages: list[dict[str, Any]]) -> None:
+        import json
+        self._session_path.parent.mkdir(parents=True, exist_ok=True)
+        self._session_path.write_text(json.dumps({"messages": messages}, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _load_session(self) -> list[dict[str, Any]] | None:
+        import json
+        try:
+            data = json.loads(self._session_path.read_text(encoding="utf-8"))
+            messages = data.get("messages")
+            return messages if isinstance(messages, list) and messages else None
+        except (OSError, json.JSONDecodeError):
+            return None
+
+    def _print_cache_stats(self, messages: list[dict[str, Any]]) -> None:
+        stats = self.context_manager.stats(messages)
+        self.console.print(f"Context cache: {'hit' if self.context_manager._summary_cache else 'empty'}; saved session: {'yes' if self._session_path.exists() else 'no'}")
+        self.console.print(f"Estimated request tokens: {stats['estimated_tokens_kept']} / {self.context_manager.max_tokens}")
 
     def index_workspace(self) -> str:
         self.workspace.ensure_exists()
@@ -416,6 +547,9 @@ class CodingAgent:
             ("/workspace", "Show the current workspace root path"),
             ("/context", "Show sliding-window context stats (turns/tokens kept vs total)"),
             ("/tokens", "Show session-level token usage statistics"),
+            ("/plan [task]", "Plan only; do not call tools or modify files"),
+            ("/cache", "Show context compression and session persistence status"),
+            ("/save", "Persist the current conversation immediately"),
         ]
         for cmd, desc in rows:
             self.console.print(f"  [cyan]{cmd:<16}[/cyan] {desc}")
