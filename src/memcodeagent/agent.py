@@ -144,8 +144,11 @@ class CodingAgent:
                 self.console.print("[green]Session saved.[/green]")
                 continue
             elif user_input.startswith("/plan"):
-                request = user_input[5:].strip() or "Provide a plan for the current conversation request."
-                self._run_plan(request, messages)
+                request = user_input[5:].strip()
+                if not request:
+                    self.console.print("[yellow]用法：/plan <要规划的任务>。不会读取或修改文件。[/yellow]")
+                else:
+                    self._run_plan(request, messages)
                 continue
             elif user_input.startswith("/"):
                 self.console.print(f"[red]Unknown command: {user_input}[/red] (type /help for a list)")
@@ -469,8 +472,12 @@ class CodingAgent:
 
     def _print_cache_stats(self, messages: list[dict[str, Any]]) -> None:
         stats = self.context_manager.stats(messages)
-        self.console.print(f"Context cache: {'hit' if self.context_manager._summary_cache else 'empty'}; saved session: {'yes' if self._session_path.exists() else 'no'}")
-        self.console.print(f"Estimated request tokens: {stats['estimated_tokens_kept']} / {self.context_manager.max_tokens}")
+        summary_state = "已生成（后续裁剪会复用）" if self.context_manager._summary_cache else "尚未触发（对话还没超出窗口）"
+        session_state = "存在，可恢复" if self._session_path.exists() else "不存在"
+        self.console.rule("[bold cyan]缓存与持久化状态")
+        self.console.print(f"上下文摘要缓存：{summary_state}")
+        self.console.print(f"会话历史文件：{session_state}（.memcode/session.json）")
+        self.console.print(f"当前请求预计 token：{stats['estimated_tokens_kept']} / {self.context_manager.max_tokens}")
 
     def index_workspace(self) -> str:
         self.workspace.ensure_exists()
@@ -513,23 +520,36 @@ class CodingAgent:
         self.console.print(retrieval_context.to_display())
 
     def _print_history(self, messages: list[dict[str, Any]]) -> None:
-        self.console.rule("[bold cyan]Conversation History")
+        self.console.rule("[bold cyan]Conversation Summary")
+        self.console.print("[dim]只显示用户消息、最终回复和工具摘要；完整原始内容保存在 session.json。[/dim]")
         for msg in messages:
             role = msg.get("role", "unknown")
-            content = msg.get("content", "")
+            content = self._clean_display_text(msg.get("content", ""))
             if role == "system":
-                self.console.print(f"[dim]SYSTEM: {content[:100]}...[/dim]")
+                continue
+            if role == "user" and content.startswith("Automated test verification"):
+                self.console.print(f"[dim]VERIFICATION: {content.splitlines()[0]}[/dim]")
             elif role == "user":
-                self.console.print(f"[cyan]USER: {content}[/cyan]")
+                self.console.print(f"[cyan]USER:[/cyan] {self._clip(content, 240)}")
             elif role == "assistant":
                 tool_calls = msg.get("tool_calls")
                 if tool_calls:
-                    self.console.print(f"[yellow]ASSISTANT: (called {len(tool_calls)} tool(s))[/yellow]")
+                    names = [tc.get("function", {}).get("name", "unknown") for tc in tool_calls]
+                    self.console.print(f"[yellow]TOOLS:[/yellow] {', '.join(names)}")
                 else:
-                    self.console.print(f"[green]ASSISTANT: {content}[/green]")
+                    self.console.print(f"[green]ASSISTANT:[/green] {self._clip(content, 600)}")
             elif role == "tool":
-                tool_call_id = msg.get("tool_call_id", "?")
-                self.console.print(f"[dim]TOOL({tool_call_id}): {content[:80]}...[/dim]")
+                self.console.print(f"[dim]TOOL RESULT:[/dim] {self._clip(content, 180)}")
+
+    @staticmethod
+    def _clean_display_text(value: Any) -> str:
+        text = value if isinstance(value, str) else str(value)
+        return text.replace("\x00", "")
+
+    @staticmethod
+    def _clip(text: str, limit: int) -> str:
+        text = " ".join(text.split())
+        return text if len(text) <= limit else text[: limit - 3] + "..."
 
     def _print_help(self) -> None:
         """Print all available REPL slash commands."""
@@ -557,21 +577,20 @@ class CodingAgent:
     def _print_context_stats(self, messages: list[dict[str, Any]]) -> None:
         """Show how the sliding window is trimming the conversation history."""
         stats = self.context_manager.stats(messages)
-        self.console.rule("[bold cyan]Context Window (sliding window)")
+        self.console.rule("[bold cyan]上下文状态")
         self.console.print(
-            f"turns: {stats['kept_turns']} kept / {stats['total_turns']} total  "
-            f"(max_turns={self.context_manager.max_turns})"
+            f"当前发送给模型：{stats['kept_turns']} / {stats['total_turns']} 轮对话 "
+            f"（最多保留 {self.context_manager.max_turns} 轮）"
         )
         self.console.print(
-            f"messages sent to model: {stats['kept_messages']} / {stats['total_messages']} in full history"
+            f"消息数：发送 {stats['kept_messages']} / 完整历史 {stats['total_messages']}"
         )
         self.console.print(
-            f"estimated tokens sent: ~{stats['estimated_tokens_kept']} / "
-            f"~{stats['estimated_tokens_full']} full (max_tokens={self.context_manager.max_tokens})"
+            f"本次请求预计 token：{stats['estimated_tokens_kept']} / 上限 {self.context_manager.max_tokens}"
         )
         if stats["kept_turns"] < stats["total_turns"]:
             dropped = stats["total_turns"] - stats["kept_turns"]
-            self.console.print(f"[yellow]{dropped} oldest turn(s) dropped from model context (still kept in /history)[/yellow]")
+            self.console.print(f"[yellow]已暂时省略较早的 {dropped} 轮；完整历史仍保存在会话文件中。[/yellow]")
 
     def _handle_models_command(self) -> None:
         """Handle `/models`: list all known models grouped by provider, with credential status."""

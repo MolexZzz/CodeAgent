@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import difflib
+import locale
 import subprocess
 from dataclasses import dataclass
 from typing import Any
@@ -159,19 +160,10 @@ class ToolExecutor:
             return f"Dry run: command was not executed: {command}"
         self.workspace.ensure_safe_command(command)
 
-        # Detect platform and use appropriate shell
+        # Use the platform default shell. On Windows this is cmd.exe, which
+        # supports the `command1 && command2` form commonly emitted by models.
         import platform
-        import sys
-
         shell_executable = None
-        if platform.system() == "Windows":
-            # Prefer PowerShell on Windows for better compatibility, fallback to cmd
-            if sys.executable:
-                # Try to find PowerShell
-                import shutil
-                pwsh = shutil.which("pwsh") or shutil.which("powershell")
-                if pwsh:
-                    shell_executable = pwsh
 
         completed = subprocess.run(
             command,
@@ -180,8 +172,22 @@ class ToolExecutor:
             executable=shell_executable,
             capture_output=True,
             timeout=timeout_seconds,
-            encoding='utf-8',
-            errors='replace',  # Replace undecodable bytes with replacement character
         )
-        output = f"exit_code={completed.returncode}\nSTDOUT:\n{completed.stdout}\nSTDERR:\n{completed.stderr}"
+        stdout = self._decode_output(completed.stdout)
+        stderr = self._decode_output(completed.stderr)
+        output = f"exit_code={completed.returncode}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}"
         return output[-6000:]
+
+    @staticmethod
+    def _decode_output(raw: bytes) -> str:
+        """Decode subprocess bytes without corrupting Windows localized output."""
+        if not raw:
+            return ""
+        import platform
+        encodings = ("utf-8", locale.getpreferredencoding(False), "cp936", "cp1252")
+        for encoding in encodings:
+            try:
+                return raw.decode(encoding)
+            except UnicodeDecodeError:
+                continue
+        return raw.decode("utf-8", errors="replace")
