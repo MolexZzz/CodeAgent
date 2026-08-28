@@ -15,6 +15,11 @@ class AgentEventKind(str, Enum):
     PAUSED = "paused"
 
 
+class ToolEventKind(str, Enum):
+    CALL = "call"
+    RESULT = "result"
+
+
 @dataclass(frozen=True, slots=True)
 class AgentEvent:
     kind: AgentEventKind
@@ -23,8 +28,16 @@ class AgentEvent:
     payload: dict[str, Any] | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class ToolEvent:
+    """Machine-facing tool trace, kept separate from user-facing progress."""
+
+    kind: ToolEventKind
+    tool: str
+    payload: dict[str, Any] | None = None
+
+
 def format_agent_event(event: AgentEvent) -> str:
     if event.detail:
         return f"{event.message} — {event.detail}"
     return event.message
-

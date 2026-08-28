@@ -152,8 +152,8 @@ class CodingAgent:
             context_manager=self.context_manager,
             max_steps=config.max_steps,
             tool_policy=ToolPolicy(),
-            confirmation_callback=lambda tool_call: self._confirm_tool(
-                tool_call.name, tool_call.args
+            confirmation_callback=lambda tool_call, policy=None: self._confirm_tool(
+                tool_call.name, tool_call.args, policy
             ),
         )
         self.verbose = False
@@ -655,6 +655,13 @@ class CodingAgent:
 
                 decision = result.decision
                 self._record_usage(decision)
+                if self.controller.last_progress_alert is not None and self.controller.last_progress_alert.kind == "final_repetition":
+                    alert = self.controller.last_progress_alert
+                    self._print_agent_event(AgentEventKind.ALERT, "重复回答检测", alert.message)
+                    self._print_agent_event(AgentEventKind.PAUSED, "任务已暂停", "请补充约束或继续执行")
+                    self._phase = "PAUSED"
+                    self._save_session(messages)
+                    return
                 if self.context_manager.last_trim_notice:
                     self._print_agent_event(
                         AgentEventKind.ALERT,
@@ -1054,10 +1061,12 @@ class CodingAgent:
         """Require confirmation only for operations that can change state."""
         return self.config.approval_required and tool_name in {"write_file", "apply_patch", "run_command"}
 
-    def _confirm_tool(self, name: str, args: dict[str, Any]) -> bool:
+    def _confirm_tool(self, name: str, args: dict[str, Any], policy: Any | None = None) -> bool:
         try:
+            reason = getattr(policy, "reason", "") if policy is not None else ""
+            suffix = f" ({reason})" if reason else ""
             answer = questionary.confirm(
-                f"Approve {self._tool_summary(name, args)}?",
+                f"Approve {self._tool_summary(name, args)}{suffix}?",
                 default=False,
             ).ask()
             return bool(answer)

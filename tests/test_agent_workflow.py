@@ -14,7 +14,7 @@ from memcodeagent.llm import AgentDecision
 from memcodeagent.memory.hybrid_retriever import RetrievalContext
 from memcodeagent.policy import PolicyAction, ToolPolicy
 from memcodeagent.progress import ProgressMonitor, ProgressSnapshot
-from memcodeagent.ui import AgentEvent, AgentEventKind, format_agent_event
+from memcodeagent.ui import AgentEvent, AgentEventKind, ToolEvent, ToolEventKind, format_agent_event
 from memcodeagent.verification import VerificationKind, classify_verification
 from memcodeagent.runtime import InvalidTransition, Phase, RuntimeEvent, StateMachine, TransitionGuard
 
@@ -527,3 +527,52 @@ def test_existing_tests_are_protected(tmp_path: Path) -> None:
     assert agent._is_protected_test_edit("apply_patch", {"path": "tests/test_existing.py"}) is True
     assert agent._is_protected_test_edit("write_file", {"path": "tests/test_existing.py"}) is True
     assert agent._is_protected_test_edit("write_file", {"path": "tests/test_new.py"}) is False
+
+
+def test_tool_policy_classifies_dangerous_commands() -> None:
+    policy = ToolPolicy()
+    assert policy.command_risk("rm -rf build")[0] == "destructive"
+    assert policy.command_risk("pip install -r requirements.txt")[0] == "environment"
+    assert policy.command_risk("git reset --hard HEAD")[0] == "destructive"
+    decision = policy.evaluate(
+        phase="IMPLEMENTING",
+        tool_name="run_command",
+        approval_required=True,
+        command="rm -rf build",
+    )
+    assert decision.action == PolicyAction.CONFIRM
+    assert decision.risk == "destructive"
+    assert "删除" in decision.reason
+
+
+def test_controller_emits_separate_tool_events() -> None:
+    events = []
+
+    class FakeTools:
+        def execute(self, name, args, call_id):
+            return type("Obs", (), {
+                "tool_name": name, "ok": True, "content": "ok",
+                "to_message": lambda self: {"role": "tool", "content": "ok"},
+            })()
+
+    call = type("Call", (), {"id": "1", "name": "read_file", "args": {"path": "a.py"}})()
+    decision = AgentDecision(
+        tool_calls=[call],
+        assistant_message={"role": "assistant", "content": None, "tool_calls": []},
+    )
+    llm = type("Llm", (), {"next_action": staticmethod(lambda _messages: decision)})()
+    controller = AgentController(
+        llm=llm, tool_executor=FakeTools(), event_callback=events.append
+    )
+    controller.handle_user_request("ANSWER", [{"role": "user", "content": "inspect"}])
+    controller.step([{"role": "user", "content": "inspect"}])
+    assert [event.kind for event in events] == [ToolEventKind.CALL, ToolEventKind.RESULT]
+    assert all(isinstance(event, ToolEvent) for event in events)
+
+
+def test_progress_monitor_detects_repeated_final_answer() -> None:
+    monitor = ProgressMonitor()
+    assert monitor.record_final_answer("完成了。") is None
+    alert = monitor.record_final_answer("  完成了。 ")
+    assert alert is not None
+    assert alert.kind == "final_repetition"

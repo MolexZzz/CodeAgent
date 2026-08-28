@@ -17,6 +17,7 @@ from memcodeagent.policy import PolicyAction, ToolPolicy
 from memcodeagent.progress import ProgressAlert, ProgressMonitor
 from memcodeagent.runtime import Phase, RuntimeEvent, StateMachine
 from memcodeagent.tools import ToolObservation
+from memcodeagent.ui import ToolEvent, ToolEventKind
 
 
 @dataclass(slots=True)
@@ -47,6 +48,7 @@ class AgentController:
         tool_policy: ToolPolicy | None = None,
         confirmation_callback: Callable[[Any], bool] | None = None,
         progress_monitor: ProgressMonitor | None = None,
+        event_callback: Callable[[Any], None] | None = None,
     ) -> None:
         self.llm = llm
         self.tool_executor = tool_executor
@@ -65,6 +67,11 @@ class AgentController:
         self.interrupted = False
         self.last_transition_error: str | None = None
         self.last_progress_alert: Any | None = None
+        self.event_callback = event_callback
+
+    def _emit_tool_event(self, event: ToolEvent) -> None:
+        if self.event_callback is not None:
+            self.event_callback(event)
 
     @property
     def phase(self) -> Phase:
@@ -150,6 +157,11 @@ class AgentController:
         self.last_decision = decision
         messages.append(decision.assistant_message)
         if decision.is_final:
+            self.last_progress_alert = self.progress_monitor.record_final_answer(
+                decision.content or ""
+            )
+            if self.last_progress_alert is not None:
+                return ControllerStep(decision=decision, phase=Phase.PAUSED)
             self.last_result = decision.content or ""
             if self.task_mode == "ANSWER":
                 self.transition(RuntimeEvent.ANSWER_GENERATED)
@@ -177,6 +189,9 @@ class AgentController:
                 )
                 continue
             self.tool_calls.append((tool_call.name, dict(tool_call.args)))
+            self._emit_tool_event(ToolEvent(ToolEventKind.CALL, tool_call.name, {
+                "id": tool_call.id, "args": dict(tool_call.args),
+            }))
             observation = None
             alert = self.progress_monitor.record_tool(tool_call.name, tool_call.args)
             self.last_progress_alert = alert
@@ -199,6 +214,7 @@ class AgentController:
                     explored=bool(context.get("explored", True)),
                     protected_test=bool(context.get("protected_test", False)),
                     duplicate=bool(context.get("duplicate", False)),
+                    command=str(tool_call.args.get("command", "")),
                 )
                 if policy.action == PolicyAction.DENY:
                     observation = ToolObservation(
@@ -208,7 +224,7 @@ class AgentController:
                     policy.action == PolicyAction.CONFIRM
                     and (
                         self.confirmation_callback is None
-                        or not self.confirmation_callback(tool_call)
+                        or not self._confirm(tool_call, policy)
                     )
                 ):
                     observation = ToolObservation(
@@ -232,6 +248,11 @@ class AgentController:
                         interrupted=True,
                     )
             observations.append(observation)
+            self._emit_tool_event(ToolEvent(ToolEventKind.RESULT, tool_call.name, {
+                "id": tool_call.id,
+                "ok": bool(getattr(observation, "ok", False)),
+                "content": str(getattr(observation, "content", "")),
+            }))
             messages.append(observation.to_message())
             progress_alert = self.progress_monitor.record_observation(
                 tool_name=tool_call.name,
@@ -242,6 +263,13 @@ class AgentController:
                 self.last_progress_alert = progress_alert
 
         return ControllerStep(decision=decision, observations=observations, phase=self.phase)
+
+    def _confirm(self, tool_call: Any, policy: Any) -> bool:
+        """Support old one-argument callbacks and richer policy-aware ones."""
+        try:
+            return bool(self.confirmation_callback(tool_call, policy))
+        except TypeError:
+            return bool(self.confirmation_callback(tool_call))
 
     def budget_exhausted(self) -> bool:
         return self.step_count >= self.max_steps

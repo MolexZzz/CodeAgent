@@ -47,6 +47,7 @@ class ProgressMonitor:
         self._last_snapshot = ProgressSnapshot()
         self._no_progress_steps = 0
         self._snapshot = ProgressSnapshot()
+        self._final_answers: deque[str] = deque(maxlen=3)
 
     @staticmethod
     def call_key(name: str, args: dict[str, Any]) -> tuple[str, str]:
@@ -82,6 +83,19 @@ class ProgressMonitor:
                 "no_progress",
                 f"连续 {self._no_progress_steps} 个步骤没有产生新的文件、修改或测试进展。",
             )
+        return None
+
+    def record_final_answer(self, content: str) -> ProgressAlert | None:
+        """Detect a model repeating the same final response without progress."""
+        normalized = " ".join(str(content or "").split()).lower()
+        if not normalized:
+            return None
+        if normalized in self._final_answers:
+            return ProgressAlert(
+                "final_repetition",
+                "检测到重复的最终回答；任务可能尚未完成，已暂停以避免循环。",
+            )
+        self._final_answers.append(normalized)
         return None
 
     def record_observation(
@@ -132,6 +146,7 @@ class ProgressMonitor:
         self._last_snapshot = ProgressSnapshot()
         self._no_progress_steps = 0
         self._snapshot = ProgressSnapshot()
+        self._final_answers.clear()
 
     def persist_state(self) -> dict[str, Any]:
         return {
@@ -143,6 +158,7 @@ class ProgressMonitor:
             "last_snapshot": asdict(self._last_snapshot),
             "snapshot": asdict(self._snapshot),
             "no_progress_steps": self._no_progress_steps,
+            "final_answers": list(self._final_answers),
         }
 
     def restore_state(self, data: dict[str, Any] | None) -> None:
@@ -171,3 +187,6 @@ class ProgressMonitor:
                 if name:
                     self._calls[(name, json.dumps(args, sort_keys=True, ensure_ascii=False))] = count
         self._no_progress_steps = int(data.get("no_progress_steps", 0))
+        final_answers = data.get("final_answers")
+        if isinstance(final_answers, list):
+            self._final_answers = deque((str(item) for item in final_answers), maxlen=3)
