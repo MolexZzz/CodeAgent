@@ -13,6 +13,7 @@ from rich.console import Console
 from rich.status import Status
 
 from memcodeagent.context_manager import ContextManager
+from memcodeagent.completion import CompletionGuard, CompletionState
 from memcodeagent.controller import AgentController
 from memcodeagent.llm import LlmClient
 from memcodeagent.memory.hybrid_retriever import HybridRetriever, RetrievalContext
@@ -162,6 +163,8 @@ class CodingAgent:
         self._phase = "IDLE"
         self._plan_text = ""
         self._protected_test_files: set[str] = set()
+        self._verification_done = False
+        self._verification_passed = False
 
     def run(self, task: str) -> str:
         """Single-turn execution: retrieve context, run agent loop, persist memory."""
@@ -395,11 +398,15 @@ class CodingAgent:
         """
         command = self._resolve_test_command()
         if not command:
+            self._verification_done = False
+            self._verification_passed = False
             return False
         self.console.rule("[bold magenta]Verification tests")
         observation = self.tools.execute("run_command", {"command": command}, tool_call_id=None)
         self.console.print(observation.to_display())
         passed = observation.ok and "exit_code=0" in observation.content
+        self._verification_done = True
+        self._verification_passed = passed
         status = "PASSED" if passed else "FAILED"
         summary = (
             f"Automated test verification after code edit: {status}.\n"
@@ -823,7 +830,15 @@ class CodingAgent:
         if not diff_obs.ok:
             return False
         messages.append({"role": "user", "content": f"Completion diff summary:\n{diff_obs.content}"})
-        return True
+        files_changed = "No changes" not in diff_obs.content and "no changes" not in diff_obs.content
+        state = CompletionState(
+            diff_checked=True,
+            verification_done=self._verification_done,
+            verification_passed=self._verification_passed,
+            unresolved_errors=False,
+            files_changed=files_changed,
+        )
+        return CompletionGuard.can_finish(TaskMode.MODIFY, state)
 
     def _snapshot_test_files(self) -> set[str]:
         files: list[Path] = []

@@ -9,6 +9,7 @@ from memcodeagent.agent import CodingAgent
 from memcodeagent.agent import IntentRouter
 from memcodeagent.agent import TaskMode
 from memcodeagent.controller import AgentController
+from memcodeagent.completion import CompletionGuard, CompletionState
 from memcodeagent.llm import AgentDecision
 from memcodeagent.memory.hybrid_retriever import RetrievalContext
 from memcodeagent.policy import PolicyAction, ToolPolicy
@@ -176,6 +177,42 @@ def test_controller_policy_can_deny_without_executing_tool() -> None:
 
     assert result.observations[0].ok is False
     assert tools.calls == 0
+
+
+def test_completion_guard_requires_verification_for_modify() -> None:
+    complete = CompletionState(
+        diff_checked=True,
+        verification_done=True,
+        verification_passed=True,
+    )
+    assert CompletionGuard.can_finish(TaskMode.MODIFY, complete) is True
+    assert CompletionGuard.can_finish(
+        TaskMode.MODIFY,
+        CompletionState(diff_checked=True, verification_done=False),
+    ) is False
+    assert CompletionGuard.can_finish(
+        TaskMode.MODIFY,
+        CompletionState(
+            diff_checked=True,
+            verification_done=True,
+            verification_passed=False,
+        ),
+    ) is False
+
+
+def test_completion_guard_read_only_modes_do_not_allow_changes() -> None:
+    assert CompletionGuard.can_finish(
+        TaskMode.ANSWER,
+        CompletionState(answer_generated=True),
+    ) is True
+    assert CompletionGuard.can_finish(
+        TaskMode.ANSWER,
+        CompletionState(answer_generated=True, files_changed=True),
+    ) is False
+    assert CompletionGuard.can_finish(
+        TaskMode.PLAN,
+        CompletionState(plan_generated=True),
+    ) is True
 
 
 def test_actionable_task_detection() -> None:

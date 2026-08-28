@@ -194,12 +194,12 @@ TEST 失败 → IMPLEMENT
 
 **目的：** 把“能否完成任务”从模型自由声明升级为 Runtime 检查，避免 Agent 在没有验证、没有 diff 或目标未满足时直接说完成。
 
-- [ ] 增加 `CompletionGuard`。
-- [ ] `ANSWER` 任务：必须已经生成面向用户的回答，且没有发生写入。
-- [ ] `PLAN` 任务：必须已经生成实施方案，且没有发生写入。
-- [ ] `MODIFY` 任务：必须经过 diff 检查、测试/验证步骤和目标一致性检查。
+- [x] 增加 `CompletionGuard`。
+- [x] `ANSWER` 任务：必须已经生成面向用户的回答，且没有发生写入。
+- [x] `PLAN` 任务：必须已经生成实施方案，且没有发生写入。
+- [x] `MODIFY` 任务：必须经过 diff 检查、测试/验证步骤和目标一致性检查。
 - [ ] 如果存在未解决错误、用户拒绝的关键工具调用或环境阻塞，不能进入 `DONE`，只能进入暂停/报告状态。
-- [ ] LLM 的“已完成”只能作为完成请求，最终是否完成由 `CompletionGuard` 决定。
+- [x] LLM 的“已完成”只能作为完成请求，最终是否完成由 `CompletionGuard` 决定。
 
 **完成标准：** `DONE` 状态只能由 `CompletionGuard` 放行；模型不能凭一句总结结束修改任务。
 
@@ -332,7 +332,8 @@ P1 的目的，是让 Agent 在较大的真实仓库中“少读、读对、读�
 | 2026-08-28 | 完成 P0.2 第一小步：独立 Controller、单步执行、状态持久化和确定性测试 | 已完成 | `81a502f` | 相关 pytest：38 passed |
 | 2026-08-28 | 完成 P0.2 第二小步：交互循环通过 Controller 获取决策并执行工具 | 部分完成 | 待提交 | `python -m py_compile ...` 通过；相关 pytest：38 passed |
 | 2026-08-28 | 完成 P0.2/P0.4 衔接：独立 `ToolPolicy`，由 Controller 统一执行 ALLOW/DENY/CONFIRM | 部分完成 | 待提交 | `python -m py_compile ...` 通过；相关 pytest：39 passed |
-| 2026-08-28 | P0.2/P0.3/P0.4 衔接：Controller 接收状态事件，计划确认/拒绝和探索完成写入状态机；策略拒绝路径加入回归测试 | 部分完成 | 待提交 | `python -m py_compile ...` 通过；相关 pytest：40 passed |
+| 2026-08-28 | P0.2/P0.3/P0.4 衔接：Controller 接收状态事件，计划确认/拒绝和探索完成写入状态机；策略拒绝路径加入回归测试 | 部分完成 | `17e72a5` | 相关 pytest：40 passed |
+| 2026-08-28 | 完成 P0.7 CompletionGuard 初版并接入修改任务最终检查 | 部分完成 | 待提交 | `python -m py_compile ...` 通过；相关 pytest：42 passed |
 
 ## 每次代码修改的固定流程
 
