@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -34,11 +35,83 @@ class AgentConfig:
     protect_existing_tests: bool = True
 
 
+class TaskMode(str, Enum):
+    ANSWER = "ANSWER"
+    PLAN = "PLAN"
+    MODIFY = "MODIFY"
+
+
+@dataclass(frozen=True, slots=True)
+class IntentResolution:
+    mode: TaskMode
+    confidence: str
+    reason: str
+
+
+class IntentRouter:
+    """Classify the user's request before entering the agent loop.
+
+    The router is deliberately rule-first. Explicit mutation requests must not
+    be downgraded by the model into read-only advice, while explanation and
+    plan-only requests should not enter the code-changing workflow.
+    """
+
+    CONVERSATIONAL = {
+        "你好", "hello", "hi", "谢谢", "thanks", "谢谢你",
+        "继续", "继续吧", "可以", "好的", "ok",
+    }
+    MODIFY_SIGNALS = (
+        "修复", "修改", "改成", "改为", "实现", "添加", "增加", "删除",
+        "重构", "补充测试", "补测试", "改代码", "写代码", "创建", "提交",
+        "fix", "implement", "refactor", "add", "change", "delete", "remove",
+        "write", "create",
+    )
+    PLAN_ONLY_GUARDS = (
+        "先不要改", "先别改", "不要改代码", "暂不修改", "暂时不要修改",
+        "只给计划", "只给方案", "只分析", "先不要动代码",
+        "do not modify", "don't modify", "plan only",
+    )
+    PLAN_SIGNALS = (
+        "计划", "方案", "怎么改", "如何改", "怎么重构", "如何重构",
+        "怎么实现", "如何实现", "设计一下", "给我一个计划", "给个计划",
+        "roadmap", "plan",
+    )
+    ANSWER_SIGNALS = (
+        "解释", "说明", "分析", "看看", "读一下", "告诉我", "为什么",
+        "是什么", "是否", "对齐", "评价", "有什么问题", "有什么可改进",
+        "explain", "analyze", "why", "what", "review",
+    )
+
+    @classmethod
+    def resolve(cls, text: str) -> IntentResolution:
+        normalized = text.strip().lower()
+        if not normalized or normalized in cls.CONVERSATIONAL:
+            return IntentResolution(TaskMode.ANSWER, "explicit", "寒暄或空请求，按普通回答处理")
+
+        if any(signal in normalized for signal in cls.PLAN_ONLY_GUARDS):
+            return IntentResolution(TaskMode.PLAN, "explicit", "检测到只规划/不修改的明确约束")
+
+        if any(signal in normalized for signal in cls.PLAN_SIGNALS):
+            return IntentResolution(TaskMode.PLAN, "high", "检测到方案或计划类意图")
+
+        if any(signal in normalized for signal in cls.MODIFY_SIGNALS):
+            return IntentResolution(TaskMode.MODIFY, "explicit", "检测到明确修改/实现/提交类意图")
+
+        if any(signal in normalized for signal in cls.ANSWER_SIGNALS):
+            return IntentResolution(TaskMode.ANSWER, "high", "检测到解释、分析或代码理解类意图")
+
+        if len(normalized) >= 24:
+            return IntentResolution(TaskMode.PLAN, "low", "长请求但没有明确修改词，先按只读规划处理")
+
+        return IntentResolution(TaskMode.ANSWER, "low", "未检测到修改词，默认只读回答")
+
+
 # Tools that modify code on disk and should trigger a verification test run.
 _CODE_EDIT_TOOLS = {"write_file", "apply_patch"}
 _READ_ONLY_TOOLS = {"list_files", "read_file", "search_text", "summarize_tree", "diff_summary"}
 _PHASE_LABELS = {
     "PLANNING": "制定计划",
+    "ANSWERING": "只读分析",
     "EXPLORING": "检查项目",
     "IMPLEMENTING": "实现修改",
     "TESTING": "运行验证",
@@ -174,7 +247,14 @@ class CodingAgent:
             # Regular user message: add to conversation and run agent loop.
             messages.append({"role": "user", "content": user_input})
             self._save_session(messages)
-            self._run_loop_interactive(messages)
+            intent = IntentRouter.resolve(user_input)
+            self.console.print(
+                f"[dim]任务模式：{intent.mode.value}（{intent.reason}）[/dim]"
+            )
+            if intent.mode in {TaskMode.ANSWER, TaskMode.PLAN}:
+                self._run_read_only_interactive(messages, intent.mode, user_input)
+            else:
+                self._run_loop_interactive(messages)
             self._save_session(messages)
 
     def _run_loop(self, messages: list[dict[str, Any]], task: str) -> str:
@@ -295,6 +375,120 @@ class CodingAgent:
         )
         messages.append({"role": "user", "content": summary})
         return not passed  # Return True if tests failed
+
+    def _run_read_only_interactive(
+        self,
+        messages: list[dict[str, Any]],
+        mode: TaskMode,
+        request: str,
+    ) -> None:
+        """Run a bounded read-only loop for ANSWER and PLAN tasks.
+
+        This is the first runtime split: code-understanding and plan-only tasks
+        may explore the repository, but edits and commands are denied before
+        they can reach the local tool executor.
+        """
+        self._stop_requested = False
+        self._phase = "ANSWERING" if mode == TaskMode.ANSWER else "PLANNING"
+        mode_instruction = {
+            "role": "system",
+            "content": (
+                f"当前任务模式是 {mode.value}。你可以使用只读工具 list_files、read_file、"
+                "search_text、summarize_tree、diff_summary 来理解仓库。不要调用 write_file、"
+                "apply_patch 或 run_command。"
+                if mode == TaskMode.ANSWER
+                else
+                f"当前任务模式是 {mode.value}。你可以使用只读工具 list_files、read_file、"
+                "search_text、summarize_tree、diff_summary 来形成方案。不要修改文件、不要运行命令。"
+                "最终回答必须是具体计划，包含目标理解、相关文件、修改步骤、风险和验证建议。"
+            ),
+        }
+        readonly_messages = [mode_instruction, *messages]
+        seen_calls: set[tuple[str, str]] = set()
+
+        for step in range(1, self.config.max_steps + 1):
+            self._print_phase(self._phase, step, self.config.max_steps)
+            trimmed = self.context_manager.trim(readonly_messages)
+            if self.context_manager.last_trim_notice:
+                self.console.print(f"[yellow]{self.context_manager.last_trim_notice}[/yellow]")
+
+            try:
+                if self.streaming_mode:
+                    self.console.print("[green]Streaming:[/green]")
+
+                    def _on_chunk(text: str) -> None:
+                        print(text, end="", flush=True)
+
+                    decision = self.llm.next_action(trimmed, stream=True, on_chunk=_on_chunk)
+                    if decision.content:
+                        print()
+                else:
+                    with Status("[cyan]Thinking...[/cyan]", console=self.console):
+                        decision = self.llm.next_action(trimmed)
+            except KeyboardInterrupt:
+                self.console.print("[yellow]已中断。[/yellow]")
+                self._phase = "PAUSED"
+                return
+
+            self._record_usage(decision)
+
+            if decision.is_final:
+                content = self._clean_display_text(decision.content or "(empty response)")
+                if not self.streaming_mode:
+                    self.console.print(f"[green]{content}[/green]")
+                messages.append({"role": "assistant", "content": content})
+                self._phase = "COMPLETED"
+                self._save_session(messages)
+                return
+
+            readonly_messages.append(decision.assistant_message)
+            messages.append(decision.assistant_message)
+            self._save_session(messages)
+            tool_names = [tc.name for tc in decision.tool_calls]
+            self.console.print(f"[dim]→ readonly: {', '.join(tool_names)}[/dim]")
+
+            for tool_call in decision.tool_calls:
+                call_key = (tool_call.name, json.dumps(tool_call.args, sort_keys=True, ensure_ascii=False))
+                if tool_call.name not in _READ_ONLY_TOOLS:
+                    observation = ToolObservation(
+                        tool_call.name,
+                        False,
+                        f"{mode.value} 模式只允许只读工具；{tool_call.name} 已被 Runtime 拒绝。",
+                        tool_call.id,
+                    )
+                elif call_key in seen_calls:
+                    observation = ToolObservation(
+                        tool_call.name,
+                        False,
+                        "Duplicate read-only tool call suppressed; use a different path, range, or query.",
+                        tool_call.id,
+                    )
+                else:
+                    seen_calls.add(call_key)
+                    try:
+                        observation = self.tools.execute(tool_call.name, tool_call.args, tool_call.id)
+                    except KeyboardInterrupt:
+                        self.console.print("[yellow]已在工具执行期间中断。[/yellow]")
+                        self._phase = "PAUSED"
+                        return
+
+                if self.verbose:
+                    self.console.print(observation.to_display())
+                else:
+                    status_icon = "✓" if observation.ok else "✗"
+                    self.console.print(
+                        f"[dim]  {status_icon} {observation.tool_name}"
+                        f"{self._tool_target(observation.tool_name, tool_call.args)}[/dim]"
+                    )
+                readonly_messages.append(observation.to_message())
+                messages.append(observation.to_message())
+                self._save_session(messages)
+
+        self.console.print(
+            f"[yellow]{mode.value} 模式已达到 {self.config.max_steps} 步预算，任务暂停。"
+            "可以继续提问或把任务改成明确的修改请求。[/yellow]"
+        )
+        self._phase = "PAUSED"
 
     def _run_loop_interactive(self, messages: list[dict[str, Any]]) -> None:
         """Core agent loop for interactive mode: uses per-error retry counter."""
