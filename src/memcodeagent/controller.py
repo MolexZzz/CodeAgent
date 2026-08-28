@@ -9,6 +9,7 @@ network access or a real workspace.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from collections.abc import Callable
 from typing import Any
 
 from memcodeagent.llm import AgentDecision
@@ -74,13 +75,22 @@ class AgentController:
         if requested is not None:
             self.state_machine.transition(requested)
 
-    def step(self, messages: list[dict[str, Any]]) -> ControllerStep:
+    def step(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        before_tools: Callable[[AgentDecision], None] | None = None,
+        tool_guard: Callable[[Any], Any | None] | None = None,
+        stream: bool = False,
+        on_chunk: Callable[[str], None] | None = None,
+    ) -> ControllerStep:
         """Run exactly one model decision and its local tool calls.
 
         The method deliberately does not approve/deny tools yet; that policy is
         the next runtime layer. It does guarantee that every decision and
         observation is appended to the supplied conversation.
         """
+        """Run exactly one model decision and its local tool calls."""
         if self.step_count >= self.max_steps:
             raise RuntimeError("controller step budget exhausted")
 
@@ -91,7 +101,14 @@ class AgentController:
             else messages
         )
         try:
-            decision = self.llm.next_action(prompt_messages)
+            if stream:
+                decision = self.llm.next_action(
+                    prompt_messages,
+                    stream=True,
+                    on_chunk=on_chunk,
+                )
+            else:
+                decision = self.llm.next_action(prompt_messages)
         except KeyboardInterrupt:
             self.interrupted = True
             return ControllerStep(
@@ -113,23 +130,44 @@ class AgentController:
                 self.state_machine.try_transition(RuntimeEvent.PLAN_GENERATED)
             return ControllerStep(decision=decision, phase=self.phase)
 
+        if before_tools is not None:
+            before_tools(decision)
+
         observations: list[Any] = []
         for tool_call in decision.tool_calls:
             self.tool_calls.append((tool_call.name, dict(tool_call.args)))
-            try:
-                observation = self.tool_executor.execute(
-                    tool_call.name,
-                    tool_call.args,
-                    tool_call.id,
-                )
-            except KeyboardInterrupt:
-                self.interrupted = True
-                return ControllerStep(
-                    decision=decision,
-                    observations=observations,
-                    phase=Phase.PAUSED,
-                    interrupted=True,
-                )
+            if tool_guard is not None:
+                observation = tool_guard(tool_call)
+                if observation is None:
+                    try:
+                        observation = self.tool_executor.execute(
+                            tool_call.name,
+                            tool_call.args,
+                            tool_call.id,
+                        )
+                    except KeyboardInterrupt:
+                        self.interrupted = True
+                        return ControllerStep(
+                            decision=decision,
+                            observations=observations,
+                            phase=Phase.PAUSED,
+                            interrupted=True,
+                        )
+            else:
+                try:
+                    observation = self.tool_executor.execute(
+                        tool_call.name,
+                        tool_call.args,
+                        tool_call.id,
+                    )
+                except KeyboardInterrupt:
+                    self.interrupted = True
+                    return ControllerStep(
+                        decision=decision,
+                        observations=observations,
+                        phase=Phase.PAUSED,
+                        interrupted=True,
+                    )
             observations.append(observation)
             messages.append(observation.to_message())
 
@@ -147,4 +185,3 @@ class AgentController:
             "last_result": self.last_result,
             "interrupted": self.interrupted,
         }
-

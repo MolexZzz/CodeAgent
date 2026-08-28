@@ -13,6 +13,7 @@ from rich.console import Console
 from rich.status import Status
 
 from memcodeagent.context_manager import ContextManager
+from memcodeagent.controller import AgentController
 from memcodeagent.llm import LlmClient
 from memcodeagent.memory.hybrid_retriever import HybridRetriever, RetrievalContext
 from memcodeagent.tools import ToolExecutor, ToolObservation
@@ -137,6 +138,12 @@ class CodingAgent:
             max_tokens=config.max_context_tokens,
             enable_summarization=True,
             llm_client=self.llm,
+        )
+        self.controller = AgentController(
+            llm=self.llm,
+            tool_executor=self.tools,
+            context_manager=self.context_manager,
+            max_steps=config.max_steps,
         )
         self.verbose = False
         self.streaming_mode = False
@@ -527,46 +534,102 @@ class CodingAgent:
         pending_edits = 0
         explored = True
         has_changes = False
+        self.controller.handle_user_request("MODIFY", messages)
 
         while True:
             for step in range(1, self.config.max_steps + 1):
-                trimmed = self.context_manager.trim(messages)
+                step_meta: dict[str, Any] = {"tool_names": []}
+
+                def before_tools(decision: Any) -> None:
+                    tool_names = [tc.name for tc in decision.tool_calls]
+                    step_meta["tool_names"] = tool_names
+                    nonlocal phase
+                    if any(name in _CODE_EDIT_TOOLS for name in tool_names) and explored:
+                        phase = "IMPLEMENTING"
+                    elif pending_edits and "run_command" in tool_names:
+                        phase = "TESTING"
+                    elif any(name in _READ_ONLY_TOOLS for name in tool_names):
+                        phase = "INSPECTING"
+                    self._print_phase(phase, step, self.config.max_steps)
+                    if self.verbose:
+                        self.console.rule(f"[bold blue]Step {step}")
+                        self.console.print(decision.to_display())
+                    else:
+                        self.console.print(f"[dim]→ calling {', '.join(tool_names)}...[/dim]")
+
+                def tool_guard(tool_call: Any) -> ToolObservation | None:
+                    call_key = (
+                        tool_call.name,
+                        json.dumps(tool_call.args, sort_keys=True, ensure_ascii=False),
+                    )
+                    if self._is_protected_test_edit(tool_call.name, tool_call.args):
+                        return ToolObservation(
+                            tool_call.name,
+                            False,
+                            "Baseline test files are protected. Add new tests in a new file, "
+                            "but do not modify tests that existed when the task started.",
+                            tool_call.id,
+                        )
+                    if not self._tool_allowed_in_phase(phase, tool_call.name, explored):
+                        return ToolObservation(
+                            tool_call.name,
+                            False,
+                            f"当前阶段“{_PHASE_LABELS.get(phase, phase)}”不允许调用 {tool_call.name}。"
+                            "请先完成项目检查，再进入实现阶段。",
+                            tool_call.id,
+                        )
+                    if call_key in seen_calls:
+                        return ToolObservation(
+                            tool_call.name,
+                            False,
+                            "Duplicate tool call suppressed; use a different path, range, query, or command.",
+                            tool_call.id,
+                        )
+                    if self._requires_approval(tool_call.name) and not self._confirm_tool(
+                        tool_call.name, tool_call.args
+                    ):
+                        seen_calls.add(call_key)
+                        return ToolObservation(
+                            tool_call.name,
+                            False,
+                            "Tool call denied by user.",
+                            tool_call.id,
+                        )
+                    seen_calls.add(call_key)
+                    return None
+
+                try:
+                    if self.streaming_mode:
+                        self.console.print("[green]Streaming:[/green]")
+
+                        def _on_chunk(text: str) -> None:
+                            print(text, end="", flush=True)
+
+                        result = self.controller.step(
+                            messages,
+                            before_tools=before_tools,
+                            tool_guard=tool_guard,
+                            stream=True,
+                            on_chunk=_on_chunk,
+                        )
+                        if result.decision.content:
+                            print()
+                    else:
+                        with Status("[cyan]Thinking...[/cyan]", console=self.console):
+                            result = self.controller.step(
+                                messages,
+                                before_tools=before_tools,
+                                tool_guard=tool_guard,
+                            )
+                except RuntimeError:
+                    self.console.print("[yellow]Runtime step budget exhausted.[/yellow]")
+                    self._phase = "PAUSED"
+                    return
+
+                decision = result.decision
+                self._record_usage(decision)
                 if self.context_manager.last_trim_notice:
                     self.console.print(f"[yellow]{self.context_manager.last_trim_notice}[/yellow]")
-
-                if self.streaming_mode:
-                    self.console.print("[green]Streaming:[/green]")
-
-                    def _on_chunk(text: str) -> None:
-                        print(text, end="", flush=True)
-
-                    try:
-                        decision = self.llm.next_action(trimmed, stream=True, on_chunk=_on_chunk)
-                    except KeyboardInterrupt:
-                        self.console.print("[yellow]Interrupted by user.[/yellow]")
-                        return
-                    if decision.content:
-                        print()
-                else:
-                    with Status("[cyan]Thinking...[/cyan]", console=self.console):
-                        try:
-                            decision = self.llm.next_action(trimmed)
-                        except KeyboardInterrupt:
-                            self.console.print("[yellow]Interrupted by user.[/yellow]")
-                            return
-
-                # Update session token counters
-                self.session_prompt_tokens += decision.usage.prompt_tokens
-                self.session_completion_tokens += decision.usage.completion_tokens
-                self.session_total_tokens += decision.usage.total_tokens
-
-                # Display token usage
-                self.console.print(
-                    f"[dim]Tokens: {decision.usage.total_tokens:,} "
-                    f"(prompt: {decision.usage.prompt_tokens:,}, "
-                    f"completion: {decision.usage.completion_tokens:,}) | "
-                    f"Session total: {self.session_total_tokens:,}[/dim]"
-                )
 
                 if decision.is_final:
                     if pending_edits:
@@ -587,69 +650,21 @@ class CodingAgent:
                         continue
                     if not self.streaming_mode:
                         self.console.print(f"[green]{decision.content}[/green]")
-                    messages.append(decision.assistant_message)
                     self._phase = "COMPLETED"
                     self._save_session(messages)
                     return
-
-                # Tool calls: show simplified or detailed view based on verbose flag
-                tool_names = [tc.name for tc in decision.tool_calls]
-                if any(name in _CODE_EDIT_TOOLS for name in tool_names) and explored:
-                    phase = "IMPLEMENTING"
-                elif pending_edits and "run_command" in tool_names:
-                    phase = "TESTING"
-                elif any(name in _READ_ONLY_TOOLS for name in tool_names):
-                    phase = "INSPECTING"
-                self._print_phase(phase, step, self.config.max_steps)
-                if self.verbose:
-                    self.console.rule(f"[bold blue]Step {step}")
-                    self.console.print(decision.to_display())
-                else:
-                    tool_names = [tc.name for tc in decision.tool_calls]
-                    self.console.print(f"[dim]→ calling {', '.join(tool_names)}...[/dim]")
-
-                messages.append(decision.assistant_message)
                 self._save_session(messages)
 
                 code_changed = False
                 current_step_has_error = False
 
-                for tool_call in decision.tool_calls:
-                    call_key = (tool_call.name, json.dumps(tool_call.args, sort_keys=True, ensure_ascii=False))
-                    if self._is_protected_test_edit(tool_call.name, tool_call.args):
-                        observation = ToolObservation(
-                            tool_call.name,
-                            False,
-                            "Baseline test files are protected. Add new tests in a new file, "
-                            "but do not modify tests that existed when the task started.",
-                            tool_call.id,
-                        )
-                    elif not self._tool_allowed_in_phase(phase, tool_call.name, explored):
-                        observation = ToolObservation(
-                            tool_call.name,
-                            False,
-                            f"当前阶段“{_PHASE_LABELS.get(phase, phase)}”不允许调用 {tool_call.name}。"
-                            "请先完成项目检查，再进入实现阶段。",
-                            tool_call.id,
-                        )
-                    elif call_key in seen_calls:
-                        observation = ToolObservation(tool_call.name, False, "Duplicate tool call suppressed; use a different path, range, query, or command.", tool_call.id)
-                    elif self._requires_approval(tool_call.name) and not self._confirm_tool(tool_call.name, tool_call.args):
-                        seen_calls.add(call_key)
-                        observation = ToolObservation(tool_call.name, False, "Tool call denied by user.", tool_call.id)
-                    else:
-                        seen_calls.add(call_key)
-                        try:
-                            observation = self.tools.execute(tool_call.name, tool_call.args, tool_call.id)
-                        except KeyboardInterrupt:
-                            self.console.print("[yellow]Interrupted during tool execution.[/yellow]")
-                            return
+                tool_names = step_meta["tool_names"]
+                for tool_call, observation in zip(decision.tool_calls, result.observations):
                     if self.verbose:
                         self.console.print(observation.to_display())
                     else:
                         status_icon = "✓" if observation.ok else "✗"
                         self.console.print(f"[dim]  {status_icon} {observation.tool_name}[/dim]")
-                    messages.append(observation.to_message())
                     self._save_session(messages)
 
                     if not observation.ok:
