@@ -60,6 +60,7 @@ class AgentController:
         self.progress_monitor = progress_monitor or ProgressMonitor()
         self.state_machine = StateMachine()
         self.task_mode: str | None = None
+        self.plan_text: str = ""
         self.step_count = 0
         self.tool_calls: list[tuple[str, dict[str, Any]]] = []
         self.last_decision: AgentDecision | None = None
@@ -80,6 +81,7 @@ class AgentController:
     def handle_user_request(self, mode: str, messages: list[dict[str, Any]]) -> None:
         """Start a task and select its initial mode through runtime events."""
         self.task_mode = mode.upper()
+        self.plan_text = ""
         self.step_count = 0
         self.tool_calls.clear()
         self.last_decision = None
@@ -135,6 +137,9 @@ class AgentController:
     def mark_blocked(self, reason: str = "") -> bool:
         self.last_result = reason or self.last_result
         return self.transition(RuntimeEvent.BLOCKED)
+
+    def set_plan(self, plan_text: str) -> None:
+        self.plan_text = plan_text or ""
 
     def step(
         self,
@@ -310,6 +315,7 @@ class AgentController:
         """Return serializable runtime state for session persistence."""
         return {
             "task_mode": self.task_mode,
+            "plan_text": self.plan_text,
             "phase": self.phase.value,
             "step_count": self.step_count,
             "max_tool_calls": self.max_tool_calls,
@@ -336,6 +342,7 @@ class AgentController:
         if not isinstance(data, dict):
             return
         self.task_mode = data.get("task_mode") or self.task_mode
+        self.plan_text = str(data.get("plan_text", self.plan_text or ""))
         phase_name = data.get("phase")
         if phase_name:
             try:

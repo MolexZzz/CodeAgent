@@ -623,3 +623,23 @@ def test_controller_lifecycle_methods_use_guarded_transitions() -> None:
     assert controller.phase == Phase.TEST
     assert controller.mark_test_result(True) is True
     assert controller.phase == Phase.VERIFY
+
+
+def test_controller_persists_plan_text() -> None:
+    controller = AgentController(llm=Mock(), tool_executor=Mock())
+    controller.set_plan("先读源码，再修复，再测")
+    state = controller.persist_state()
+    assert state["plan_text"] == "先读源码，再修复，再测"
+    restored = AgentController(llm=Mock(), tool_executor=Mock())
+    restored.restore_state(state)
+    assert restored.plan_text == "先读源码，再修复，再测"
+
+
+def test_session_restore_keeps_plan_text(tmp_path: Path) -> None:
+    agent = CodingAgent(AgentConfig(workspace=tmp_path))
+    agent.controller.set_plan("先探索，再修改")
+    agent._plan_text = "先探索，再修改"
+    agent._save_session([{"role": "user", "content": "fix"}])
+    restored = agent._load_session()
+    assert restored is not None
+    assert agent._plan_text == "先探索，再修改"

@@ -105,11 +105,11 @@ P0 的目的不是增加很多工具，而是先保证 Agent 的行为可控、�
 
 **目的：** 把阶段、权限、预算、确认和中断统一放在一个 Runtime 控制层，避免逻辑散落在 prompt 和工具循环中。
 
-- [/] 增加 `AgentController`，统一持有任务模式、当前阶段、计划、步数、工具调用记录和任务结果。
-- [/] 将现有 `_run_loop_interactive` 中的控制逻辑逐步迁移到 Controller。
+- [x] 增加 `AgentController`，统一持有任务模式、当前阶段、计划、步数、工具调用记录和任务结果。
+- [x] 将现有 `_run_loop_interactive` 中的控制逻辑逐步迁移到 Controller。
 - [x] Controller 负责每一步循环：准备上下文 → 请求模型 → 解析决策 → 执行工具 → 记录消息。
 - [x] Controller 只负责执行 Runtime 策略，不负责决定具体技术方案。
-- [/] 模型不能直接修改 phase、完成状态或预算。
+- [x] 模型不能直接修改 phase、完成状态或预算。
 
 **完成标准：** 所有工具调用和任务结束都经过 Controller；CLI 只负责输入输出，不再自行决定 Agent 状态。
 
@@ -136,8 +136,8 @@ TEST 失败 → IMPLEMENT
 - [x] 定义明确的 `Phase` 枚举。
 - [x] 定义明确的事件，如 `exploration_complete`、`plan_ready`、`user_approved`、`implementation_done`、`test_failed`。
 - [x] 通过 `transition(current_phase, event)` 决定下一阶段。
-- [/] 禁止模型直接写入阶段字段。
-- [/] 非法转换记录 Runtime 错误并要求模型重新决策。
+- [x] 禁止模型直接写入阶段字段。
+- [x] 非法转换记录 Runtime 错误并要求模型重新决策。
 
 **完成标准：** `PLAN` 阶段调用写入工具会被 Runtime 拒绝；测试失败可以回到实现，但不能跳过验证直接完成。
 

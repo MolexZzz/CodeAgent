@@ -942,6 +942,7 @@ class CodingAgent:
         if decision.content:
             cleaned_plan = self._strip_tool_protocol(decision.content)
             self._plan_text = cleaned_plan
+            self.controller.set_plan(cleaned_plan)
             messages.append({"role": "assistant", "content": f"计划：\n{cleaned_plan}"})
         messages.append({"role": "user", "content": "计划已确认。现在开始执行，按计划检查、修改并验证项目。"})
         self.controller.transition(RuntimeEvent.USER_APPROVED)
@@ -1297,6 +1298,7 @@ class CodingAgent:
         controller_state = data.get("controller")
         if isinstance(controller_state, dict):
             self.controller.restore_state(controller_state)
+            self._plan_text = self.controller.plan_text
         verification = data.get("verification")
         if isinstance(verification, dict):
             self._verification_done = bool(verification.get("done", False))
