@@ -1,144 +1,189 @@
 # MemCodeAgent
 
-轻量级命令行编程助手，带有项目记忆和代码检索功能。
+MemCodeAgent 是一个面向本地仓库的轻量级命令行编程智能体。它通过大语言模型的原生工具调用能力检查代码、修改文件、执行命令，并在指定工作区中迭代验证变更。
 
-MemCodeAgent 是为软件工程推免考核项目开发的：它与大语言模型交互，调用本地工具，读写文件，执行命令，观察结果，并迭代完成编程任务。核心的 agent 循环、工具执行、上下文管理、输出解析和记忆层均在本仓库中自行实现，未使用任何 agent 框架。
+项目中的智能体运行时、上下文管理、工具执行、安全检查和本地项目记忆均由本仓库实现。模型调用使用标准的 OpenAI 兼容 Chat Completions API。
 
-## 目标
+## 功能特性
 
-- 提供清晰的命令行编程助手工作流
-- 保持本地文件和命令执行的显式可检查性
-- 添加基于关键词的项目记忆功能
-- 实现简洁的代码检索机制
-- 保持实现足够小，便于在面试中解释
+- 面向软件工程任务的交互式命令行界面。
+- 使用原生 LLM 工具调用完成文件查看、搜索、编辑、补丁和命令执行。
+- 校验工作区边界，避免文件操作越出指定项目。
+- 默认在编辑文件和执行命令前请求确认。
+- 提供只读的 `/plan` 与 `/explain` 命令，用于设计和代码理解任务。
+- 使用 ReAct 风格循环：记录工具结果后请求模型给出下一步操作。
+- 代码变更后自动检测并运行测试命令。
+- 默认保护任务开始前已经存在的测试文件。
+- 在 `.memcode/` 下持久化会话历史和轻量级项目记忆。
+- 支持配置上下文窗口、重试预算和工具调用预算。
+- 通过环境变量支持 OpenAI 兼容的模型服务。
 
-## 快速开始
+## 环境要求
 
-安装：
+- Python 3.11 或更高版本
+- 已配置的模型服务 API Key
+
+## 安装
+
+克隆仓库后，以可编辑模式安装项目：
 
 ```bash
-python -m pip install -e .[dev]
+python -m pip install -e ".[dev]"
 ```
 
-配置环境变量（根据你使用的平台选择）：
+该命令会安装 CLI 命令 `mca` 以及开发依赖，其中包括 `pytest`。
 
-**PowerShell:**
+## 配置
+
+复制示例配置文件，并填写模型服务的凭据：
+
+```bash
+copy .env.example .env
+```
+
+在 macOS 或 Linux 上：
+
+```bash
+cp .env.example .env
+```
+
+至少在 `.env` 中配置 API Key 和模型名称：
+
+```dotenv
+OPENAI_API_KEY=your-api-key
+OPENAI_BASE_URL=https://api.openai.com/v1
+MEMCODE_MODEL=gpt-4o-mini
+```
+
+`OPENAI_BASE_URL` 为可选项。使用 OpenAI 兼容接口时，将其设置为对应服务的 API 地址。`.env.example` 中提供了其他服务商的配置示例。
+
+也可以不创建 `.env`，而是通过环境变量配置：
+
 ```powershell
-$env:OPENAI_API_KEY="your-key"
-$env:OPENAI_BASE_URL="https://api.openai.com/v1"  # 可选，默认为 OpenAI 官方
-$env:MEMCODE_MODEL="gpt-4o-mini"  # 可选，默认为 gpt-4o-mini
+$env:OPENAI_API_KEY = "your-api-key"
+$env:OPENAI_BASE_URL = "https://api.openai.com/v1"
+$env:MEMCODE_MODEL = "gpt-4o-mini"
 ```
 
-**cmd (Windows):**
-```cmd
-set OPENAI_API_KEY=your-key
-set OPENAI_BASE_URL=https://api.openai.com/v1
-set MEMCODE_MODEL=gpt-4o-mini
-```
+请勿提交包含真实凭据的 `.env` 文件；该文件默认已被 Git 忽略。
 
-**bash/zsh (Linux/macOS):**
-```bash
-export OPENAI_API_KEY="your-key"
-export OPENAI_BASE_URL="https://api.openai.com/v1"
-export MEMCODE_MODEL="gpt-4o-mini"
-```
+## 使用方式
 
-运行：
+在当前目录启动交互式会话：
 
 ```bash
-# 直接进入交互式 Agent（等价于 mca chat）
 mca
-
-# 单次任务执行
-mca run "阅读这个项目并总结下一步实现方向"
-
-# 交互式 REPL
-mca chat
-
-# 如确实需要修改已有测试，可关闭基线测试保护
-mca --no-protect-tests
 ```
 
-### 环境变量说明
+为指定仓库启动会话：
 
-| 变量 | 必需 | 说明 |
-|------|------|------|
-| `OPENAI_API_KEY` | 是 | API 密钥（OpenAI 或兼容服务） |
-| `OPENAI_BASE_URL` | 否 | API 端点地址，默认为 `https://api.openai.com/v1` |
-| `MEMCODE_MODEL` | 否 | 模型名称，默认为 `gpt-4o-mini` |
-
-### 使用其他服务商
-
-本项目支持任何 OpenAI 兼容的 API 服务，包括但不限于：
-
-**DeepSeek:**
 ```bash
-export OPENAI_API_KEY="your-deepseek-key"
-export OPENAI_BASE_URL="https://api.deepseek.com"
-export MEMCODE_MODEL="deepseek-chat"
+mca chat --workspace D:\path\to\project
 ```
 
-**月之暗面 Kimi:**
+执行单次任务：
+
 ```bash
-export OPENAI_API_KEY="your-kimi-key"
-export OPENAI_BASE_URL="https://api.moonshot.cn/v1"
-export MEMCODE_MODEL="moonshot-v1-8k"
+mca run "为用户名为空的情况添加校验，并运行相关测试。" --workspace .
 ```
 
-**Azure OpenAI:**
+构建或刷新本地项目记忆索引：
+
 ```bash
-export OPENAI_API_KEY="your-azure-key"
-export OPENAI_BASE_URL="https://your-resource.openai.azure.com/openai/deployments/your-deployment"
-export MEMCODE_MODEL="gpt-4"
+mca index --workspace .
 ```
 
-**本地部署 (Ollama/vLLM 等):**
+常用选项：
+
 ```bash
-export OPENAI_API_KEY="dummy"  # 本地服务通常不需要真实密钥
-export OPENAI_BASE_URL="http://localhost:8000/v1"
-export MEMCODE_MODEL="qwen2.5-coder"
+# 仅生成计划，不修改文件或执行命令。
+mca chat --dry-run
+
+# 对已信任的工作区关闭逐工具确认。
+mca chat --no-approve
+
+# 允许智能体修改任务开始前已有的测试文件。
+mca chat --no-protect-tests
+
+# 提高任务的错误重试次数。
+mca chat --max-error-retries 15
 ```
 
-## 架构
+## 交互命令
+
+在 `mca chat` 会话中可使用以下命令：
+
+| 命令 | 说明 |
+| --- | --- |
+| `/plan <任务>` | 生成只读的实现计划。 |
+| `/explain <问题>` | 基于工作区给出只读说明。 |
+| `/models` | 列出已知模型及其凭据状态。 |
+| `/model [名称]` | 选择一个已配置的模型。 |
+| `/workspace [路径]` | 显示或切换工作区。 |
+| `/context` | 显示上下文窗口统计信息。 |
+| `/tokens` | 显示当前会话的 Token 用量。 |
+| `/save` | 持久化当前会话。 |
+| `/clear` | 清除已持久化的会话记录。 |
+| `/help` | 列出可用命令。 |
+
+普通的实现请求会进入智能体工作流：模型选择下一步操作，CLI 在策略检查后于本地执行该操作，将结果追加到对话中，并持续循环，直到任务完成、暂停或达到预算限制。
+
+## 工作原理
+
+对于编程任务，MemCodeAgent 在本地执行以下循环：
 
 ```text
-用户任务
-  -> 检索项目记忆（关键词匹配）
-  -> 询问 LLM 下一步操作（OpenAI 原生 tool calling）
-  -> 执行本地工具（工作区沙盒化）
-  -> 将观察结果追加到上下文
-  -> 重复直到任务完成或达到最大步数
-  -> 将任务摘要和元数据持久化到记忆
+用户请求
+  -> 创建任务上下文并检索相关项目记忆
+  -> 请求模型给出下一步操作
+  -> 校验并执行请求的本地工具
+  -> 将工具结果追加到对话
+  -> 重复执行，直至完成、暂停、得到验证结果或达到预算上限
 ```
 
-**已实现功能：**
-- **原生 LLM 工具调用**：使用 OpenAI function-calling API，支持 6 个工具（list_files、read_file、search_text、write_file、apply_patch、run_command）
-- **自行实现的 agent 循环**：对话管理、工具分发、终止条件、错误处理
-- **本地工具执行**：所有文件/命令操作在本地运行，带工作区路径验证和危险命令拦截
-- **仓库级工作流**：交互模式包含只读探索、计划确认、实现、测试、修复和最终检查阶段
-- **测试保护**：默认保护任务开始前已有的测试文件，避免通过削弱测试制造成功
-- **变更审查**：提供目录摘要和 git diff 摘要工具，帮助控制上下文和最终总结
-- **轻量级记忆**：任务历史持久化到 `.memcode/memory.json`，通过 token 重叠评分检索（无向量数据库）
-- **多编辑补丁**：`apply_patch` 支持多个顺序替换，输出统一 diff
-- **Typer CLI**：`mca run <任务>` 命令，支持工作区选择、步数限制和 dry-run 模式
-- **全面测试**：29 个单元测试覆盖工具执行、记忆持久化/检索和 LLM 消息解析
+智能体可使用的本地工具包括：
 
-### 可控工作流
+- 列出文件和读取文件内容
+- 在工作区内搜索文本
+- 写入文件和应用补丁
+- 执行经确认的 Shell 命令
+- 检查相关仓库变更
 
-- 交互式 `mca chat` 默认在每次工具调用前请求确认，可用 `--no-approve` 关闭。
-- Agent 循环受 `--max-steps` 硬上限约束，按 `Ctrl-C` 可中断当前请求；中断不会继续执行后续工具。
-- `/plan [任务]` 只生成实施方案，不提供工具权限，也不会修改文件。
-- 会话消息在每轮自动保存到工作区 `.memcode/session.json`，重新进入 `chat` 会恢复；`/save` 可手动保存，`/clear` 会同步清空持久化会话。
-- `/context` 显示滑动窗口统计；发生压缩时会提示保留完整历史但仅发送近期上下文。`/cache` 显示摘要缓存和会话文件状态。
+所有工具操作均受所选工作区限制。策略层会识别可能删除文件、访问网络或改变环境的命令，以便执行前进行审查。
 
-### 课程要求核对
+## 本地数据
 
-本项目自行实现了对话历史与上下文裁剪、摘要压缩、原生 tool calling 输出解析、工具注册与本地执行、工作区路径校验、命令安全检查、重试与终止条件、错误观察回传和 JSON 记忆持久化。仅使用模型厂商 API 客户端库，没有使用 LangChain、LlamaIndex、OpenAI Agents SDK、Claude Agent SDK、AutoGen、CrewAI 等 Agent 框架，也没有使用服务端托管的文件或代码执行工具。
+MemCodeAgent 会在选定工作区下写入运行状态：
+
+```text
+.memcode/
+  memory.json
+  session.json
+```
+
+这些文件保存任务摘要、检索元数据和会话状态，属于本地运行产物，默认被 Git 忽略。
+
+## 开发
+
+运行完整测试：
+
+```bash
+pytest
+```
+
+运行指定测试模块：
+
+```bash
+pytest tests/test_agent_workflow.py
+```
 
 ## 安全说明
 
-API 密钥必须通过环境变量或本地未入库的配置文件提供。请勿提交凭据、包含可见密钥的终端录屏或生成的密钥文件。
+- 将模型服务凭据保存到环境变量或未跟踪的 `.env` 文件中。
+- 批准命令前请确认其用途，尤其是安装依赖、访问网络、删除文件或修改版本控制状态的命令。
+- 仅在信任工作区和任务内容时使用 `--no-approve`。
+- 智能体会操作本地文件和命令，提交前应审阅其生成的变更。
 
 ## 许可证
 
-MIT
+本项目采用 [MIT License](LICENSE) 发布。
