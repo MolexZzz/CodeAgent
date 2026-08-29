@@ -223,6 +223,16 @@ def test_tool_policy_permission_matrix() -> None:
         tool_name="write_file",
         approval_required=True,
     ).action == PolicyAction.CONFIRM
+    assert "创建或覆盖" in policy.evaluate(
+        phase="IMPLEMENTING",
+        tool_name="write_file",
+        approval_required=True,
+    ).reason
+    assert "修改工作区文件" in policy.evaluate(
+        phase="IMPLEMENTING",
+        tool_name="apply_patch",
+        approval_required=True,
+    ).reason
 
 
 def test_tool_targets_are_concise() -> None:
@@ -755,6 +765,13 @@ def test_tool_policy_classifies_dangerous_commands() -> None:
     assert decision.action == PolicyAction.CONFIRM
     assert decision.risk == "destructive"
     assert "删除" in decision.reason
+    maven_decision = policy.evaluate(
+        phase="TESTING",
+        tool_name="run_command",
+        approval_required=True,
+        command="mvn test",
+    )
+    assert "Maven 测试" in maven_decision.reason
 
 
 def test_controller_emits_separate_tool_events() -> None:

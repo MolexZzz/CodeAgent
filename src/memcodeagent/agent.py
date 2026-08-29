@@ -1525,7 +1525,10 @@ class CodingAgent:
                     "3-5 step plan in your assistant content. Inspect only files relevant to the task, "
                     "use line ranges for large files, avoid repeating an identical tool call, do not "
                     "weaken or delete tests just to make them pass, and finish with verification and "
-                    f"a concise summary. {self._shell_instructions()}"
+                    "a concise summary. After a code edit, the runtime automatically runs the configured "
+                    "test command and adds its result to the conversation; do not immediately call the "
+                    "same test command again unless the user explicitly asks for a rerun or another edit "
+                    f"has happened. {self._shell_instructions()}"
                 ),
             },
             {
@@ -1547,7 +1550,10 @@ class CodingAgent:
                     "3-5 step plan in your assistant content. Inspect only files relevant to the task, "
                     "use line ranges for large files, avoid repeating an identical tool call, do not "
                     "weaken or delete tests just to make them pass, and finish with verification and "
-                    f"a concise summary. {self._shell_instructions()} "
+                    "a concise summary. After a code edit, the runtime automatically runs the configured "
+                    "test command and adds its result to the conversation; do not immediately call the "
+                    "same test command again unless the user explicitly asks for a rerun or another edit "
+                    f"has happened. {self._shell_instructions()} "
                     "You are in an interactive chat session, so the user may ask follow-up questions or "
                     "refine their requests across multiple turns."
                 ),

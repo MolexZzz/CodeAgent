@@ -45,6 +45,10 @@ class ToolPolicy:
         explain why confirmation is needed.
         """
         text = " ".join(str(command).split()).lower()
+        if re.search(r"\bmvn(?:w)?\s+(test|verify)\b", text):
+            return "external", "将执行 Maven 测试并读取测试结果"
+        if re.search(r"\bmvn(?:w)?\s+(compile|package|install|deploy)\b", text):
+            return "external", "将执行 Maven 构建命令并可能修改构建产物"
         if re.search(r"(^|[;&|])\s*(rm|del|erase|rmdir|remove-item|format)\b", text):
             return "destructive", "可能删除文件或目录"
         if re.search(r"\b(git\s+(reset|clean)|checkout\s+--|restore\s+--)", text):
@@ -82,8 +86,20 @@ class ToolPolicy:
             if tool_name == "run_command":
                 risk, explanation = self.command_risk(command)
                 return PolicyDecision(PolicyAction.CONFIRM, explanation, risk)
+            if tool_name == "write_file":
+                return PolicyDecision(
+                    PolicyAction.CONFIRM,
+                    "将创建或覆盖工作区文件",
+                    "filesystem",
+                )
+            if tool_name == "apply_patch":
+                return PolicyDecision(
+                    PolicyAction.CONFIRM,
+                    "将修改工作区文件中的指定内容",
+                    "filesystem",
+                )
             return PolicyDecision(
                 PolicyAction.CONFIRM,
-                "该工具可能修改文件、环境或执行外部命令。",
+                "该操作可能修改工作区状态",
             )
         return PolicyDecision(PolicyAction.ALLOW)
