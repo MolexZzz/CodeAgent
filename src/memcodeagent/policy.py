@@ -53,8 +53,10 @@ class ToolPolicy:
             return "environment", "可能安装依赖并修改环境"
         if re.search(r"\b(curl|wget|invoke-webrequest|irm)\b", text):
             return "network", "可能访问外部网络或下载内容"
-        if re.search(r"(^|\s)(mv|move|cp|copy|tee)\b|>{1,2}", text):
+        if re.search(r"(^|\s)(mv|move|cp|copy|tee)\b", text):
             return "filesystem", "可能覆盖、移动或复制文件"
+        if re.search(r">{1,2}|2>&1", text):
+            return "redirect", "将命令输出写入日志文件"
         return "normal", "可能执行外部命令"
 
     def evaluate(
@@ -72,11 +74,6 @@ class ToolPolicy:
             return PolicyDecision(
                 PolicyAction.DENY,
                 "Baseline test files are protected; add a new test instead.",
-            )
-        if duplicate:
-            return PolicyDecision(
-                PolicyAction.DENY,
-                "Duplicate tool call suppressed; use a different path, range, query, or command.",
             )
         # Runtime phases describe the agent's current activity for display and
         # persistence. They must not decide whether the model may inspect,

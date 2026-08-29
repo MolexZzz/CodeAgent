@@ -14,6 +14,18 @@ _CONTEXT_SNIPPET_CHARS = 800
 _DEFAULT_READ_MAX_LINES = 200
 _DEFAULT_READ_MAX_CHARS = 24000
 _DEFAULT_SEARCH_MAX_CHARS = 16000
+_LONG_RUNNING_COMMANDS = (
+    "spring-boot:run",
+    "npm run dev",
+    "pnpm dev",
+    "yarn dev",
+    "vite",
+    "flask run",
+    "uvicorn",
+    "python -m http.server",
+    "docker compose up",
+    "gradle bootrun",
+)
 
 
 @dataclass(slots=True)
@@ -222,16 +234,21 @@ class ToolExecutor:
             return f"Dry run: command was not executed: {command}"
         self.workspace.ensure_safe_command(command)
 
-        # Use the platform default shell. On Windows this is cmd.exe, which
-        # supports the `command1 && command2` form commonly emitted by models.
         import platform
-        shell_executable = None
+        normalized = " ".join(command.lower().split())
+        is_background = (
+            any(marker in normalized for marker in _LONG_RUNNING_COMMANDS)
+            or normalized.startswith("start /b")
+            or normalized.startswith("start \"\"")
+        )
+
+        if is_background:
+            return self._start_background_command(command, platform.system())
 
         completed = subprocess.run(
             command,
             cwd=self.workspace.root,
             shell=True,
-            executable=shell_executable,
             capture_output=True,
             timeout=timeout_seconds,
         )
@@ -239,6 +256,37 @@ class ToolExecutor:
         stderr = self._decode_output(completed.stderr)
         output = f"exit_code={completed.returncode}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}"
         return output[-6000:]
+
+    def _start_background_command(self, command: str, system: str) -> str:
+        """Start a long-running process without inheriting the agent's pipes."""
+        log_path = self.workspace.root / ".memcode" / "process.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_handle = log_path.open("ab")
+        try:
+            kwargs: dict[str, Any] = {
+                "cwd": self.workspace.root,
+                "shell": True,
+                "stdin": subprocess.DEVNULL,
+                "stdout": log_handle,
+                "stderr": log_handle,
+                "close_fds": True,
+            }
+            if system.lower() == "windows":
+                kwargs["creationflags"] = (
+                    subprocess.DETACHED_PROCESS
+                    | subprocess.CREATE_NEW_PROCESS_GROUP
+                )
+            else:
+                kwargs["start_new_session"] = True
+            process = subprocess.Popen(command, **kwargs)
+        except BaseException:
+            log_handle.close()
+            raise
+        log_handle.close()
+        return (
+            f"Started background command (pid={process.pid}). "
+            f"Output is being written to {log_path.relative_to(self.workspace.root).as_posix()}."
+        )
 
     @staticmethod
     def _decode_output(raw: bytes) -> str:

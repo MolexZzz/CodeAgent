@@ -8,9 +8,10 @@ from memcodeagent.agent import AgentConfig
 from memcodeagent.agent import CodingAgent
 from memcodeagent.agent import IntentRouter
 from memcodeagent.agent import TaskMode
-from memcodeagent.controller import AgentController
+from memcodeagent.controller import AgentController, _close_unanswered_tool_calls
 from memcodeagent.completion import CompletionGuard, CompletionState
-from memcodeagent.llm import AgentDecision
+from memcodeagent.llm import AgentDecision, ToolCall
+from memcodeagent.tools import ToolObservation
 from memcodeagent.memory.hybrid_retriever import RetrievalContext
 from memcodeagent.policy import PolicyAction, ToolPolicy
 from memcodeagent.progress import ProgressMonitor, ProgressSnapshot
@@ -100,6 +101,61 @@ def test_agent_controller_runs_one_tool_turn() -> None:
     assert tools.calls == [("list_files", {"glob": "*.py"}, "1")]
     assert messages[-1] == {"role": "tool", "content": "app.py"}
     assert controller.persist_state()["step_count"] == 1
+
+
+def test_controller_closes_all_tool_calls_when_execution_is_interrupted() -> None:
+    call_1 = type("ToolCall", (), {"id": "call-1", "name": "first", "args": {}})()
+    call_2 = type("ToolCall", (), {"id": "call-2", "name": "second", "args": {}})()
+    decision = AgentDecision(
+        tool_calls=[call_1, call_2],
+        assistant_message={
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {"id": "call-1"},
+                {"id": "call-2"},
+            ],
+        },
+    )
+
+    class InterruptingTools:
+        def execute(self, name, args, tool_call_id):
+            raise KeyboardInterrupt
+
+    llm = type("FakeLlm", (), {"next_action": lambda self, messages: decision})()
+    messages = [{"role": "user", "content": "continue"}]
+    controller = AgentController(
+        llm=llm,
+        tool_executor=InterruptingTools(),
+        max_steps=1,
+    )
+
+    result = controller.step(messages)
+
+    assert result.interrupted is True
+    assert [
+        message["tool_call_id"]
+        for message in messages
+        if message["role"] == "tool"
+    ] == ["call-1", "call-2"]
+
+
+def test_close_unanswered_tool_calls_repairs_existing_history() -> None:
+    messages = [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{"id": "call-1"}, {"id": "call-2"}],
+        },
+        {"role": "tool", "tool_call_id": "call-1", "content": "ok"},
+        {"role": "user", "content": "continue"},
+    ]
+
+    repaired = _close_unanswered_tool_calls(messages)
+
+    assert repaired == 1
+    assert messages[2]["role"] == "tool"
+    assert messages[2]["tool_call_id"] == "call-2"
 
 
 def test_agent_controller_final_answer_transitions_to_done() -> None:
@@ -297,6 +353,104 @@ def test_progress_monitor_detects_no_progress() -> None:
     alert = monitor.record_snapshot(snapshot)
     assert alert is not None
     assert alert.kind == "no_progress"
+
+
+def test_repeated_tool_call_warns_before_pausing() -> None:
+    agent = CodingAgent(
+        AgentConfig(workspace=Path.cwd(), max_steps=3, max_duplicate_attempts=2),
+        console=Mock(),
+    )
+    agent.retriever.remember_task = Mock()
+    agent.tools.execute = Mock(
+        return_value=ToolObservation("run_command", True, "exit_code=0")
+    )
+    call_1 = ToolCall("call-1", "run_command", {"command": "mvn -q package -DskipTests"})
+    call_2 = ToolCall("call-2", "run_command", {"command": "mvn -q package -DskipTests"})
+    decisions = [
+        AgentDecision(
+            tool_calls=[call_1],
+            assistant_message={
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{"id": "call-1"}],
+            },
+        ),
+        AgentDecision(
+            tool_calls=[call_2],
+            assistant_message={
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{"id": "call-2"}],
+            },
+        ),
+        AgentDecision(
+            content="done",
+            assistant_message={"role": "assistant", "content": "done"},
+        ),
+    ]
+
+    messages = [{"role": "user", "content": "build the project"}]
+    with patch.object(agent.llm, "next_action", side_effect=decisions):
+        result = agent._run_loop(messages, "build the project")
+
+    assert result == "done"
+    assert len(agent.tools.execute.call_args_list) == 2
+    assert any(
+        "intentional and approved" in str(message.get("content", ""))
+        for message in messages
+        if message.get("role") == "user"
+    )
+
+
+def test_duplicate_policy_does_not_override_confirmation() -> None:
+    decision = ToolPolicy().evaluate(
+        phase="IMPLEMENTING",
+        tool_name="run_command",
+        approval_required=True,
+        duplicate=True,
+        command="mvn test",
+    )
+    assert decision.action == PolicyAction.CONFIRM
+
+
+def test_controller_executes_duplicate_after_confirmation() -> None:
+    call = ToolCall("call-1", "run_command", {"command": "mvn test"})
+    decision = AgentDecision(
+        tool_calls=[call],
+        assistant_message={"role": "assistant", "content": None},
+    )
+
+    class FakeLlm:
+        def next_action(self, _messages):
+            return decision
+
+    class FakeTools:
+        def __init__(self):
+            self.calls = 0
+
+        def execute(self, *_args):
+            self.calls += 1
+            return ToolObservation("run_command", True, "ok", call.id)
+
+    tools = FakeTools()
+    controller = AgentController(
+        llm=FakeLlm(),
+        tool_executor=tools,
+        tool_policy=ToolPolicy(),
+        confirmation_callback=lambda *_args: True,
+    )
+    controller.progress_monitor.record_tool("run_command", {"command": "mvn test"})
+    result = controller.step(
+        [{"role": "user", "content": "run the test again"}],
+        tool_context=lambda _call: {
+            "phase": "IMPLEMENTING",
+            "approval_required": True,
+            "duplicate": True,
+        },
+    )
+
+    assert result.observations[0].ok is True
+    assert tools.calls == 1
 
 
 def test_controller_enforces_tool_call_budget() -> None:

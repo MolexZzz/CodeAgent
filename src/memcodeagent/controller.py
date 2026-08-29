@@ -20,6 +20,57 @@ from memcodeagent.tools import ToolObservation
 from memcodeagent.ui import ToolEvent, ToolEventKind
 
 
+def _close_unanswered_tool_calls(messages: list[dict[str, Any]]) -> int:
+    """Add synthetic tool results for interrupted/incomplete assistant turns."""
+    repaired = 0
+    index = 0
+    while index < len(messages):
+        message = messages[index]
+        if message.get("role") != "assistant":
+            index += 1
+            continue
+        tool_calls = message.get("tool_calls") or []
+        if not isinstance(tool_calls, list) or not tool_calls:
+            index += 1
+            continue
+
+        expected = [
+            str(call.get("id", ""))
+            for call in tool_calls
+            if isinstance(call, dict) and call.get("id")
+        ]
+        if not expected:
+            index += 1
+            continue
+
+        existing_ids: set[str] = set()
+        cursor = index + 1
+        while cursor < len(messages) and messages[cursor].get("role") == "tool":
+            tool_call_id = messages[cursor].get("tool_call_id")
+            if tool_call_id:
+                existing_ids.add(str(tool_call_id))
+            cursor += 1
+
+        missing = [tool_call_id for tool_call_id in expected if tool_call_id not in existing_ids]
+        if missing:
+            insert_at = index + 1
+            while insert_at < len(messages) and messages[insert_at].get("role") == "tool":
+                insert_at += 1
+            messages[insert_at:insert_at] = [
+                {
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": "(interrupted) Tool execution was interrupted before a result was recorded.",
+                }
+                for tool_call_id in missing
+            ]
+            repaired += len(missing)
+            index = insert_at + len(missing)
+        else:
+            index = cursor
+    return repaired
+
+
 @dataclass(slots=True)
 class ControllerStep:
     """Result of one controller iteration."""
@@ -168,6 +219,7 @@ class AgentController:
             raise RuntimeError("controller step budget exhausted")
 
         self.step_count += 1
+        _close_unanswered_tool_calls(messages)
         prompt_messages = (
             self.context_manager.trim(messages)
             if self.context_manager is not None
@@ -234,17 +286,10 @@ class AgentController:
             observation = None
             alert = self.progress_monitor.record_tool(tool_call.name, tool_call.args)
             self.last_progress_alert = alert
-            if alert is not None and alert.kind == "duplicate_tool":
-                observation = ToolObservation(
-                    tool_call.name,
-                    False,
-                    alert.message,
-                    tool_call.id,
-                )
             if tool_guard is not None:
                 if observation is None:
                     observation = tool_guard(tool_call)
-            elif self.tool_policy is not None:
+            elif self.tool_policy is not None and observation is None:
                 context = tool_context(tool_call) if tool_context else {}
                 policy = self.tool_policy.evaluate(
                     phase=str(context.get("phase", "IMPLEMENTING")),
@@ -280,6 +325,7 @@ class AgentController:
                     )
                 except KeyboardInterrupt:
                     self.interrupted = True
+                    _close_unanswered_tool_calls(messages)
                     return ControllerStep(
                         decision=decision,
                         observations=observations,
@@ -301,6 +347,7 @@ class AgentController:
             if progress_alert is not None:
                 self.last_progress_alert = progress_alert
 
+        _close_unanswered_tool_calls(messages)
         return ControllerStep(decision=decision, observations=observations, phase=self.phase)
 
     def _confirm(self, tool_call: Any, policy: Any) -> bool:

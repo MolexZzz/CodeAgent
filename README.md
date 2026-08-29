@@ -78,7 +78,7 @@ mca
 为指定仓库启动会话：
 
 ```bash
-mca chat --workspace /path/to/project
+mca chat --workspace <project-path>
 ```
 
 执行单次任务：

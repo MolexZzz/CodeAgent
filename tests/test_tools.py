@@ -1,7 +1,9 @@
 from pathlib import Path
 
 import pytest
+from unittest.mock import patch
 
+import memcodeagent.tools as tools_module
 from memcodeagent.tools import ToolExecutor
 from memcodeagent.workspace import Workspace
 
@@ -22,6 +24,24 @@ def test_diff_summary_handles_non_git_workspace(tmp_path: Path) -> None:
     observation = make_executor(tmp_path).execute("diff_summary", {})
     assert observation.ok
     assert "No git repository found" in observation.content
+
+
+def test_long_running_command_starts_in_background(tmp_path: Path) -> None:
+    executor = make_executor(tmp_path)
+    process = type("Process", (), {"pid": 1234})()
+
+    with patch.object(tools_module.subprocess, "Popen", return_value=process) as popen:
+        observation = executor.execute(
+            "run_command",
+            {"command": "mvn -q spring-boot:run > backend.log 2>&1"},
+        )
+
+    assert observation.ok
+    assert "pid=1234" in observation.content
+    assert "process.log" in observation.content
+    kwargs = popen.call_args.kwargs
+    assert kwargs["stdin"] is tools_module.subprocess.DEVNULL
+    assert kwargs["close_fds"] is True
 
 
 def test_write_file_creates_new_file(tmp_path: Path) -> None:

@@ -48,6 +48,16 @@ def test_tool_retry_exhausted(tmp_path: Path) -> None:
         assert "Persistent error" in obs.content
 
 
+def test_run_command_executes_with_platform_default_shell() -> None:
+    executor = ToolExecutor(Workspace(Path.cwd()), dry_run=False, max_tool_retries=0)
+
+    observation = executor.execute("run_command", {"command": "echo test"}, None)
+
+    assert observation.ok
+    assert "exit_code=0" in observation.content
+    assert "test" in observation.content.lower()
+
+
 def test_deterministic_tools_do_not_retry(tmp_path: Path) -> None:
     """write_file and apply_patch should not auto-retry (they're deterministic)."""
     workspace = Workspace(tmp_path)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import platform
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -43,6 +44,7 @@ class AgentConfig:
     protect_existing_tests: bool = True
     max_tool_calls: int = 64
     max_test_attempts: int = 5
+    max_duplicate_attempts: int = 2
 
 
 class TaskMode(str, Enum):
@@ -344,27 +346,36 @@ class CodingAgent:
             progress_alert = self.controller.last_progress_alert
             if progress_alert is not None:
                 self.controller.last_progress_alert = None
-                if progress_alert.kind in {
-                    "duplicate_tool",
-                    "no_progress",
-                    "final_repetition",
-                }:
+                if progress_alert.kind == "duplicate_tool":
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                f"Runtime warning: {progress_alert.message} "
+                                "This call is identical to the previous one. "
+                                "If the repetition is intentional and approved, continue; "
+                                "otherwise inspect its result or choose a different action."
+                            ),
+                        }
+                    )
+                elif progress_alert.kind in {"no_progress", "final_repetition"}:
                     last_result = (
                         f"任务已暂停：{progress_alert.message}"
                     )
                     self._phase = "PAUSED"
                     self._save_session(messages)
                     return last_result
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": (
-                            f"Runtime progress warning: {progress_alert.message} "
-                            "This is only a warning; continue if the current exploration "
-                            "is producing new information, otherwise choose a different action."
-                        ),
-                    }
-                )
+                else:
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                f"Runtime progress warning: {progress_alert.message} "
+                                "This is only a warning; continue if the current exploration "
+                                "is producing new information, otherwise choose a different action."
+                            ),
+                        }
+                    )
             changed = any(
                 obs.ok and call.name in _CODE_EDIT_TOOLS
                 for call, obs in zip(result.decision.tool_calls, result.observations)
@@ -750,13 +761,6 @@ class CodingAgent:
                         tool_call.name,
                         False,
                         f"{mode.value} 模式只允许只读工具；{tool_call.name} 已被 Runtime 拒绝。",
-                        tool_call.id,
-                    )
-                elif call_key in seen_calls:
-                    observation = ToolObservation(
-                        tool_call.name,
-                        False,
-                        "Duplicate read-only tool call suppressed; use a different path, range, or query.",
                         tool_call.id,
                     )
                 else:
@@ -1421,28 +1425,39 @@ class CodingAgent:
 
     def _save_session(self, messages: list[dict[str, Any]]) -> None:
         import json
+        import os
+        import tempfile
+
         self._session_path.parent.mkdir(parents=True, exist_ok=True)
-        self._session_path.write_text(
-            json.dumps(
-                {
-                    "messages": messages,
-                    "task": self._current_task,
-                    "pending_approval": self._pending_approval,
-                    "phase": self._phase,
-                    "plan": self._plan_text,
-                    "controller": self.controller.persist_state(),
-                    "verification": {
-                        "done": self._verification_done,
-                        "passed": self._verification_passed,
-                        "kind": None if self._last_verification_kind is None else self._last_verification_kind.value,
-                        "attempts": self._test_attempts,
-                    },
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
+        payload = {
+            "messages": messages,
+            "task": self._current_task,
+            "pending_approval": self._pending_approval,
+            "phase": self._phase,
+            "plan": self._plan_text,
+            "controller": self.controller.persist_state(),
+            "verification": {
+                "done": self._verification_done,
+                "passed": self._verification_passed,
+                "kind": None if self._last_verification_kind is None else self._last_verification_kind.value,
+                "attempts": self._test_attempts,
+            },
+        }
+        fd, temp_name = tempfile.mkstemp(
+            prefix="session.", suffix=".tmp", dir=self._session_path.parent
         )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False, indent=2)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_name, self._session_path)
+        except BaseException:
+            try:
+                os.unlink(temp_name)
+            except OSError:
+                pass
+            raise
 
     def _load_session(self) -> list[dict[str, Any]] | None:
         import json
@@ -1458,7 +1473,12 @@ class CodingAgent:
             self._plan_text = data.get("plan", "")
             self._restore_runtime_state(data)
             return messages if isinstance(messages, list) and messages else None
-        except (OSError, json.JSONDecodeError):
+        except json.JSONDecodeError:
+            self.console.print(
+                "[yellow]会话文件格式不完整，已忽略损坏历史并创建新会话。[/yellow]"
+            )
+            return None
+        except OSError:
             return None
 
     def _restore_runtime_state(self, data: dict[str, Any]) -> None:
@@ -1505,7 +1525,7 @@ class CodingAgent:
                     "3-5 step plan in your assistant content. Inspect only files relevant to the task, "
                     "use line ranges for large files, avoid repeating an identical tool call, do not "
                     "weaken or delete tests just to make them pass, and finish with verification and "
-                    "a concise summary."
+                    f"a concise summary. {self._shell_instructions()}"
                 ),
             },
             {
@@ -1527,12 +1547,24 @@ class CodingAgent:
                     "3-5 step plan in your assistant content. Inspect only files relevant to the task, "
                     "use line ranges for large files, avoid repeating an identical tool call, do not "
                     "weaken or delete tests just to make them pass, and finish with verification and "
-                    "a concise summary. "
+                    f"a concise summary. {self._shell_instructions()} "
                     "You are in an interactive chat session, so the user may ask follow-up questions or "
                     "refine their requests across multiple turns."
                 ),
             },
         ]
+
+    @staticmethod
+    def _shell_instructions() -> str:
+        if platform.system().lower() == "windows":
+            return (
+                "The current operating system is Windows; use PowerShell or Windows-compatible "
+                "commands, never POSIX background syntax such as `&`, `$!`, or `2>&1`."
+            )
+        return (
+            f"The current operating system is {platform.system() or 'Unix'}; use commands "
+            "compatible with that platform and do not assume Windows paths."
+        )
 
     def _print_context(self, retrieval_context: RetrievalContext) -> None:
         self.console.rule("[bold cyan]Retrieved Context")
