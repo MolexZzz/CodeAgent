@@ -56,3 +56,32 @@ def test_inspecting_phase_does_not_block_a_safe_edit() -> None:
     )
 
     assert decision.action == PolicyAction.ALLOW
+
+
+def test_read_only_mode_does_not_execute_shell_commands(tmp_path: Path) -> None:
+    console = Console(file=StringIO())
+    agent = CodingAgent(AgentConfig(workspace=tmp_path, max_steps=1), console=console)
+    agent.tools.execute = Mock()
+
+    call = Mock()
+    call.id = "run-1"
+    call.name = "run_command"
+    call.args = {"command": "echo unsafe"}
+    decision = AgentDecision(
+        tool_calls=[call],
+        assistant_message={
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{"id": "run-1", "function": {"name": "run_command"}}],
+        },
+    )
+
+    with patch.object(agent.llm, "next_action", return_value=decision):
+        agent._run_read_only_interactive(
+            [{"role": "user", "content": "explain"}],
+            TaskMode.ANSWER,
+            "explain",
+            display_final=False,
+        )
+
+    agent.tools.execute.assert_not_called()

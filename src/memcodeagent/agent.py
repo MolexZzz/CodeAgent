@@ -158,6 +158,7 @@ class CodingAgent:
             tool_executor=self.tools,
             context_manager=self.context_manager,
             max_steps=config.max_steps,
+            max_tool_calls=config.max_tool_calls,
             tool_policy=ToolPolicy(),
             confirmation_callback=lambda tool_call, policy=None: self._confirm_tool(
                 tool_call.name, tool_call.args, policy
@@ -183,10 +184,14 @@ class CodingAgent:
         self._last_diff_summary = ""
         self._last_verification_command = ""
         self._last_completion_report = ""
+        self._current_task = ""
+        self._pending_approval: dict[str, Any] | None = None
 
     def run(self, task: str) -> str:
         """Single-turn execution through the normal ReAct loop."""
         self.workspace.ensure_exists()
+        self._reset_task_state()
+        self._current_task = task
         retrieval_context = self.retriever.retrieve(task)
         self._print_context(retrieval_context)
 
@@ -294,13 +299,15 @@ class CodingAgent:
 
             # Ordinary messages always use the model-driven ReAct loop.
             messages.append({"role": "user", "content": user_input})
+            self._reset_task_state()
+            self._current_task = user_input
             self._save_session(messages)
             self._run_loop_interactive(messages)
             self._save_session(messages)
 
     def _run_loop(self, messages: list[dict[str, Any]], task: str) -> str:
         """Run a single task through the Controller-owned loop."""
-        self.controller.handle_user_request("MODIFY", messages)
+        self.controller.handle_user_request("NORMAL", messages)
         self.controller.mark_implementation_started()
         self._stop_requested = False
         self._phase = "IMPLEMENTING"
@@ -343,10 +350,25 @@ class CodingAgent:
                 self.controller.mark_implementation_done()
                 self.controller.mark_diff_checked()
                 self.controller.mark_test_result(self._verification_passed)
-                self.controller.mark_modify_completed()
+                if not test_failed and not self._verification_unresolved_error:
+                    self.controller.mark_modify_completed()
             if result.decision.is_final:
                 if not has_changes:
+                    if current_step_has_error:
+                        error_retry_count, last_error_detected, should_stop = self._update_error_retry_state(
+                            True,
+                            error_retry_count,
+                            last_error_detected,
+                        )
+                        if should_stop:
+                            self._phase = "PAUSED"
+                            self._save_session(messages)
+                            return (
+                                f"Stopped after {error_retry_count} failed attempts to fix the error."
+                            )
+                        continue
                     self.retriever.remember_task(task, last_result)
+                    self.controller.mark_task_completed()
                     self._phase = "COMPLETED"
                     self._save_session(messages)
                     return last_result
@@ -369,6 +391,25 @@ class CodingAgent:
         self.retriever.remember_task(task, last_result)
         self._save_session(messages)
         return last_result or "任务尚未完成，已暂停。"
+
+    def _reset_task_state(self) -> None:
+        """Clear per-request verification and progress state before a new task."""
+        self._stop_requested = False
+        self._phase = "IDLE"
+        self._verification_done = False
+        self._verification_passed = False
+        self._last_verification_kind = None
+        self._test_attempts = 0
+        self._verification_unresolved_error = False
+        self._last_diff_summary = ""
+        self._last_verification_command = ""
+        self._last_completion_report = ""
+        self._protected_test_files = (
+            self._snapshot_test_files()
+            if self.config.protect_existing_tests
+            else set()
+        )
+        self.controller.reset_budget()
 
     def _run_loop_legacy(self, messages: list[dict[str, Any]], task: str) -> str:
         """Core agent loop for single-turn mode: uses per-error retry counter.
@@ -608,12 +649,12 @@ class CodingAgent:
             "role": "system",
             "content": (
                 f"当前任务模式是 {mode.value}。你可以使用只读工具 list_files、read_file、"
-                "search_text、summarize_tree、diff_summary，也可以在需要时使用 run_command 来检查环境或查看结果。"
+                "search_text、summarize_tree、diff_summary。"
                 "不要调用 write_file 或 apply_patch。"
                 if mode == TaskMode.ANSWER
                 else
                 f"当前任务模式是 {mode.value}。你可以使用只读工具 list_files、read_file、"
-                "search_text、summarize_tree、diff_summary，也可以在需要时使用 run_command 来辅助分析。"
+                "search_text、summarize_tree、diff_summary。"
                 "不要修改文件。"
                 "最终回答必须是具体计划，包含目标理解、相关文件、修改步骤、风险和验证建议。"
             ),
@@ -665,7 +706,7 @@ class CodingAgent:
 
             for tool_call in decision.tool_calls:
                 call_key = (tool_call.name, json.dumps(tool_call.args, sort_keys=True, ensure_ascii=False))
-                allowed_tools = _READ_ONLY_TOOLS | {"run_command"}
+                allowed_tools = _READ_ONLY_TOOLS
                 if tool_call.name not in allowed_tools:
                     observation = ToolObservation(
                         tool_call.name,
@@ -710,6 +751,18 @@ class CodingAgent:
         return None
 
     def _run_loop_interactive(self, messages: list[dict[str, Any]]) -> None:
+        """Run the same ReAct core as single-turn mode and render its result."""
+        user_messages = [
+            str(message.get("content") or "")
+            for message in messages
+            if message.get("role") == "user"
+        ]
+        task = user_messages[-1] if user_messages else ""
+        result = self._run_loop(messages, task)
+        if result:
+            self.console.print(f"[green]{result}[/green]")
+
+    def _run_loop_interactive_legacy(self, messages: list[dict[str, Any]]) -> None:
         """Core agent loop for interactive mode: uses per-error retry counter."""
         self.controller.handle_user_request("MODIFY", messages)
 
@@ -1266,6 +1319,11 @@ class CodingAgent:
         return self.config.approval_required and tool_name in {"write_file", "apply_patch", "run_command"}
 
     def _confirm_tool(self, name: str, args: dict[str, Any], policy: Any | None = None) -> bool:
+        self._pending_approval = {
+            "tool": name,
+            "args": dict(args),
+            "reason": getattr(policy, "reason", "") if policy is not None else "",
+        }
         try:
             reason = getattr(policy, "reason", "") if policy is not None else ""
             suffix = f" ({reason})" if reason else ""
@@ -1277,6 +1335,8 @@ class CodingAgent:
         except (KeyboardInterrupt, EOFError):
             self._stop_requested = True
             return False
+        finally:
+            self._pending_approval = None
 
     @staticmethod
     def _tool_summary(name: str, args: dict[str, Any]) -> str:
@@ -1316,6 +1376,8 @@ class CodingAgent:
             json.dumps(
                 {
                     "messages": messages,
+                    "task": self._current_task,
+                    "pending_approval": self._pending_approval,
                     "phase": self._phase,
                     "plan": self._plan_text,
                     "controller": self.controller.persist_state(),
@@ -1337,6 +1399,11 @@ class CodingAgent:
         try:
             data = json.loads(self._session_path.read_text(encoding="utf-8"))
             messages = data.get("messages")
+            self._current_task = str(data.get("task", ""))
+            pending_approval = data.get("pending_approval")
+            self._pending_approval = (
+                pending_approval if isinstance(pending_approval, dict) else None
+            )
             self._phase = data.get("phase", "IDLE")
             self._plan_text = data.get("plan", "")
             self._restore_runtime_state(data)

@@ -11,6 +11,11 @@ from enum import Enum
 
 class Phase(str, Enum):
     IDLE = "IDLE"
+    RUNNING = "RUNNING"
+    WAITING_APPROVAL = "WAITING_APPROVAL"
+    VERIFYING = "VERIFYING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
     UNDERSTAND = "UNDERSTAND"
     PLAN = "PLAN"
     CONFIRM = "CONFIRM"
@@ -88,6 +93,20 @@ class TransitionGuard:
         _TRANSITIONS[(_active_phase, RuntimeEvent.INTERRUPTED)] = Phase.PAUSED
         _TRANSITIONS[(_active_phase, RuntimeEvent.BUDGET_EXHAUSTED)] = Phase.PAUSED
         _TRANSITIONS[(_active_phase, RuntimeEvent.BLOCKED)] = Phase.PAUSED
+
+    for _react_phase in (Phase.RUNNING, Phase.VERIFYING, Phase.WAITING_APPROVAL):
+        _TRANSITIONS[(_react_phase, RuntimeEvent.IMPLEMENTATION_STARTED)] = Phase.RUNNING
+        _TRANSITIONS[(_react_phase, RuntimeEvent.IMPLEMENTATION_DONE)] = Phase.VERIFYING
+        _TRANSITIONS[(_react_phase, RuntimeEvent.DIFF_CHECKED)] = Phase.VERIFYING
+        _TRANSITIONS[(_react_phase, RuntimeEvent.TEST_PASSED)] = Phase.VERIFYING
+        _TRANSITIONS[(_react_phase, RuntimeEvent.TEST_FAILED)] = Phase.RUNNING
+        _TRANSITIONS[(_react_phase, RuntimeEvent.MODIFY_COMPLETED)] = Phase.COMPLETED
+        _TRANSITIONS[(_react_phase, RuntimeEvent.ANSWER_GENERATED)] = Phase.COMPLETED
+        _TRANSITIONS[(_react_phase, RuntimeEvent.USER_APPROVED)] = Phase.RUNNING
+        _TRANSITIONS[(_react_phase, RuntimeEvent.USER_REJECTED)] = Phase.PAUSED
+        _TRANSITIONS[(_react_phase, RuntimeEvent.BLOCKED)] = Phase.FAILED
+        _TRANSITIONS[(_react_phase, RuntimeEvent.INTERRUPTED)] = Phase.PAUSED
+        _TRANSITIONS[(_react_phase, RuntimeEvent.BUDGET_EXHAUSTED)] = Phase.PAUSED
 
     @classmethod
     def next_phase(cls, current: Phase, event: RuntimeEvent) -> Phase:

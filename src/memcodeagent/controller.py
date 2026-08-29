@@ -99,6 +99,9 @@ class AgentController:
         }.get(self.task_mode)
         if requested is not None:
             self.state_machine.transition(requested)
+        else:
+            # Ordinary ReAct tasks do not enter the legacy intent workflow.
+            self.state_machine.phase = Phase.RUNNING
         self.progress_monitor.record_phase(self.phase.value)
 
     def transition(self, event: RuntimeEvent) -> bool:
@@ -126,6 +129,9 @@ class AgentController:
 
     def mark_modify_completed(self) -> bool:
         return self.transition(RuntimeEvent.MODIFY_COMPLETED)
+
+    def mark_task_completed(self) -> bool:
+        return self.transition(RuntimeEvent.ANSWER_GENERATED)
 
     def mark_interrupted(self) -> bool:
         self.interrupted = True
