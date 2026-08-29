@@ -47,9 +47,23 @@ class ContextManager:
     max_tokens: int = 24000
     enable_summarization: bool = True
     llm_client: "LlmClient | None" = None
+    working_memory: Any | None = None
     _summary_cache: str | None = None  # Cached summary of previously dropped turns
     _summary_dropped_count: int = 0
     last_trim_notice: str | None = None
+
+    def persist_state(self) -> dict[str, Any]:
+        return {
+            "summary_cache": self._summary_cache,
+            "summary_dropped_count": self._summary_dropped_count,
+        }
+
+    def restore_state(self, data: dict[str, Any] | None) -> None:
+        if not isinstance(data, dict):
+            return
+        summary = data.get("summary_cache")
+        self._summary_cache = str(summary) if summary else None
+        self._summary_dropped_count = int(data.get("summary_dropped_count", 0))
 
     def summarize_recent(self, messages: list[dict[str, Any]], max_turns: int = 8) -> str:
         """Summarize recent conversation turns for user-facing history."""
@@ -132,10 +146,13 @@ class ContextManager:
         trimmed_rest = [msg for turn in turns for msg in turn]
 
         # Inject summary between system messages and conversation turns
+        working_msg = None
+        if self.working_memory is not None:
+            working_msg = {"role": "system", "content": self.working_memory.to_context_text()}
         if summary_msg:
-            result = system_msgs + [summary_msg] + trimmed_rest
+            result = system_msgs + [summary_msg] + ([working_msg] if working_msg else []) + trimmed_rest
         else:
-            result = system_msgs + trimmed_rest
+            result = system_msgs + ([working_msg] if working_msg else []) + trimmed_rest
 
         # A single active turn can itself exceed the budget (for example, a
         # large file read followed by test output), so turn-level trimming

@@ -22,6 +22,12 @@ class TaskRecord:
 
     task: str
     summary: str
+    task_id: str = ""
+    status: str = "completed"
+    key_changes: list[str] = field(default_factory=list)
+    tests: list[str] = field(default_factory=list)
+    unresolved_issues: list[str] = field(default_factory=list)
+    lessons_learned: list[str] = field(default_factory=list)
     changed_files: list[str] = field(default_factory=list)
     failed_commands: list[str] = field(default_factory=list)
     timestamp: str = ""
@@ -30,6 +36,12 @@ class TaskRecord:
         return {
             "task": self.task,
             "summary": self.summary,
+            "task_id": self.task_id,
+            "status": self.status,
+            "key_changes": self.key_changes,
+            "tests": self.tests,
+            "unresolved_issues": self.unresolved_issues,
+            "lessons_learned": self.lessons_learned,
             "changed_files": self.changed_files,
             "failed_commands": self.failed_commands,
             "timestamp": self.timestamp,
@@ -40,6 +52,12 @@ class TaskRecord:
         return TaskRecord(
             task=data.get("task", ""),
             summary=data.get("summary", ""),
+            task_id=data.get("task_id", ""),
+            status=data.get("status", "completed"),
+            key_changes=list(data.get("key_changes", [])),
+            tests=list(data.get("tests", [])),
+            unresolved_issues=list(data.get("unresolved_issues", [])),
+            lessons_learned=list(data.get("lessons_learned", [])),
             changed_files=list(data.get("changed_files", [])),
             failed_commands=list(data.get("failed_commands", [])),
             timestamp=data.get("timestamp", ""),

@@ -14,11 +14,11 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.status import Status
 
-from memcodeagent.context_manager import ContextManager
 from memcodeagent.completion import CompletionGuard, CompletionState
 from memcodeagent.controller import AgentController
 from memcodeagent.llm import LlmClient
-from memcodeagent.memory.hybrid_retriever import HybridRetriever, RetrievalContext
+from memcodeagent.memory.hybrid_retriever import RetrievalContext
+from memcodeagent.memory_manager import MemoryManager
 from memcodeagent.policy import ToolPolicy
 from memcodeagent.runtime import RuntimeEvent
 from memcodeagent.verification import VerificationKind, classify_verification
@@ -149,13 +149,14 @@ class CodingAgent:
             max_tool_retries=config.max_tool_retries,
             max_read_bytes=config.max_read_bytes,
         )
-        self.retriever = HybridRetriever(self.workspace)
-        self.context_manager = ContextManager(
-            max_turns=config.max_context_turns,
-            max_tokens=config.max_context_tokens,
-            enable_summarization=True,
+        self.memory = MemoryManager(
+            self.workspace,
+            max_context_turns=config.max_context_turns,
+            max_context_tokens=config.max_context_tokens,
             llm_client=self.llm,
         )
+        self.retriever = self.memory.retriever
+        self.context_manager = self.memory.context_manager
         self.controller = AgentController(
             llm=self.llm,
             tool_executor=self.tools,
@@ -174,7 +175,7 @@ class CodingAgent:
         self.session_prompt_tokens = 0
         self.session_completion_tokens = 0
         self.session_total_tokens = 0
-        self._session_path = self.workspace.root / ".memcode" / "session.json"
+        self._session_path = self.memory.transcript.path
         self._stop_requested = False
         self._phase = "IDLE"
         self._plan_text = ""
@@ -196,7 +197,7 @@ class CodingAgent:
         self.workspace.ensure_exists()
         self._reset_task_state()
         self._current_task = task
-        retrieval_context = self.retriever.retrieve(task)
+        retrieval_context = self.memory.retrieve(task)
         self._print_context(retrieval_context)
 
         messages = self._initial_messages(task, retrieval_context)
@@ -240,6 +241,8 @@ class CodingAgent:
                 break
             elif user_input == "/clear":
                 messages = self._initial_messages_chat()
+                self.memory.reset_working_memory()
+                self._current_task = ""
                 self._save_session(messages)
                 self.console.print("[yellow]Conversation cleared.[/yellow]")
                 continue
@@ -414,13 +417,13 @@ class CodingAgent:
                                 f"Stopped after {error_retry_count} failed attempts to fix the error."
                             )
                         continue
-                    self.retriever.remember_task(task, last_result)
+                    self.memory.remember_task(task, last_result)
                     self.controller.mark_task_completed()
                     self._phase = "COMPLETED"
                     self._save_session(messages)
                     return last_result
                 if self._final_completion_checks(messages):
-                    self.retriever.remember_task(task, last_result)
+                    self.memory.remember_task(task, last_result)
                     self._phase = "COMPLETED"
                     self._save_session(messages)
                     return last_result
@@ -430,12 +433,12 @@ class CodingAgent:
                 last_error_detected,
             )
             if should_stop:
-                self.retriever.remember_task(task, f"Stopped after {error_retry_count} failed attempts to fix the error.")
+                self.memory.remember_task(task, f"Stopped after {error_retry_count} failed attempts to fix the error.")
                 self._phase = "PAUSED"
                 self._save_session(messages)
                 return f"Stopped after {error_retry_count} failed attempts to fix the error."
         self._phase = "PAUSED"
-        self.retriever.remember_task(task, last_result)
+        self.memory.remember_task(task, last_result)
         self._save_session(messages)
         return last_result or "任务尚未完成，已暂停。"
 
@@ -486,12 +489,12 @@ class CodingAgent:
         while step < self.config.max_steps:
             step += 1
             self.console.rule(f"[bold blue]Step {step}")
-            trimmed = self.context_manager.trim(messages)
+            trimmed = self.memory.trim_context(messages)
             try:
                 decision = self.llm.next_action(trimmed)
             except KeyboardInterrupt:
                 final = "Interrupted by user. No further tool calls were executed."
-                self.retriever.remember_task(task, final)
+                self.memory.remember_task(task, final)
                 return final
             self.console.print(decision.to_display())
 
@@ -500,7 +503,7 @@ class CodingAgent:
 
             if decision.is_final:
                 final = self._strip_tool_protocol(decision.content or "(empty response)")
-                self.retriever.remember_task(task, final)
+                self.memory.remember_task(task, final)
                 return final
 
             # Execute all tool calls and collect observations.
@@ -512,11 +515,11 @@ class CodingAgent:
                     observation = self.tools.execute(tool_call.name, tool_call.args, tool_call.id)
                 except KeyboardInterrupt:
                     final = "Interrupted by user during tool execution."
-                    self.retriever.remember_task(task, final)
+                    self.memory.remember_task(task, final)
                     return final
                 self.console.print(observation.to_display())
                 messages.append(observation.to_message())
-                self.retriever.record_tool_result(tool_call.name, observation.ok, tool_call.args, observation.content)
+                self.memory.record_tool_result(tool_call.name, observation.ok, tool_call.args, observation.content)
 
                 if not observation.ok:
                     current_step_has_error = True
@@ -547,7 +550,7 @@ class CodingAgent:
 
                 if error_retry_count >= self.config.max_error_retries:
                     final = f"Stopped after {error_retry_count} failed attempts to fix the error."
-                    self.retriever.remember_task(task, final)
+                    self.memory.remember_task(task, final)
                     return final
             else:
                 # No error in this step - reset counter if we were in error state
@@ -556,7 +559,7 @@ class CodingAgent:
                     error_retry_count = 0
                     last_error_detected = False
         final = f"Stopped after reaching the maximum of {self.config.max_steps} agent steps."
-        self.retriever.remember_task(task, final)
+        self.memory.remember_task(task, final)
         return final
 
     def _resolve_test_command(self) -> str | None:
@@ -674,6 +677,11 @@ class CodingAgent:
             VerificationKind.ENVIRONMENT_ERROR,
             VerificationKind.COMMAND_ERROR,
         }
+        self.memory.record_test_result(
+            command,
+            passed,
+            verification.summary,
+        )
         status = "PASSED" if verification.passed else "FAILED"
         summary = (
             f"Automated test verification after code edit: {status} "
@@ -719,7 +727,7 @@ class CodingAgent:
 
         for step in range(1, self.config.max_steps + 1):
             self._print_phase(self._phase, step, self.config.max_steps)
-            trimmed = self.context_manager.trim(readonly_messages)
+            trimmed = self.memory.trim_context(readonly_messages)
             if self.context_manager.last_trim_notice:
                 self.console.print(f"[yellow]{self.context_manager.last_trim_notice}[/yellow]")
 
@@ -749,7 +757,7 @@ class CodingAgent:
                     self.console.print(Markdown(content))
                 messages.append({"role": "assistant", "content": content})
                 self._phase = "COMPLETED"
-                self.retriever.remember_task(request, content)
+                self.memory.remember_task(request, content)
                 self._save_session(messages)
                 return content
 
@@ -1139,7 +1147,7 @@ class CodingAgent:
         explored = False
         for step in range(1, 5):
             self._print_phase("EXPLORING", step, 4)
-            trimmed = self.context_manager.trim([exploration_instruction, *messages])
+            trimmed = self.memory.trim_context([exploration_instruction, *messages])
             try:
                 decision = self.llm.next_action(trimmed)
             except KeyboardInterrupt:
@@ -1431,6 +1439,7 @@ class CodingAgent:
 
     def _save_session(self, messages: list[dict[str, Any]]) -> None:
         import json
+        self._sync_working_memory()
         import os
         import tempfile
 
@@ -1450,44 +1459,140 @@ class CodingAgent:
                 "attempts": self._test_attempts,
             },
         }
-        fd, temp_name = tempfile.mkstemp(
-            prefix="session.", suffix=".tmp", dir=self._session_path.parent
-        )
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(payload, handle, ensure_ascii=False, indent=2)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temp_name, self._session_path)
-        except BaseException:
-            try:
-                os.unlink(temp_name)
-            except OSError:
-                pass
-            raise
+        self.memory.save_session(payload)
 
     def _load_session(self) -> list[dict[str, Any]] | None:
-        import json
+        data = self.memory.load_session()
+        if data is None:
+            return None
+        messages = data.get("messages")
+        self._current_task = str(data.get("task", ""))
+        pending_approval = data.get("pending_approval")
+        self._pending_approval = (
+            pending_approval if isinstance(pending_approval, dict) else None
+        )
+        self._phase = data.get("phase", "IDLE")
+        self._plan_text = data.get("plan", "")
+        self._history_summary = str(data.get("history_summary", ""))
+        self._restore_working_memory(data.get("working_memory"))
+        self._restore_runtime_state(data)
+        return messages if isinstance(messages, list) and messages else None
+
+    def _sync_working_memory(self) -> None:
+        working = self.memory.working_memory
+        working.current_task = self._current_task
+        working.phase = self._phase
+        working.plan_text = self._plan_text
+        working.history_summary = self._history_summary
+        working.last_verification_command = self._last_verification_command
+        working.verification_kind = (
+            None if self._last_verification_kind is None else self._last_verification_kind.value
+        )
+        working.verification_done = self._verification_done
+        working.verification_passed = self._verification_passed
+        working.last_diff_summary = self._last_diff_summary
+        working.unresolved_issue = (
+            "verification environment or command error"
+            if self._verification_unresolved_error
+            else ""
+        )
+
+    def _restore_working_memory(self, data: dict[str, Any] | None) -> None:
+        self.memory.working_memory.restore_state(data)
+        working = self.memory.working_memory
+        if not data:
+            return
+        self._current_task = working.current_task
+        self._phase = working.phase
+        self._plan_text = working.plan_text
+        self._history_summary = working.history_summary
+        self._last_verification_command = working.last_verification_command
         try:
-            data = json.loads(self._session_path.read_text(encoding="utf-8"))
-            messages = data.get("messages")
-            self._current_task = str(data.get("task", ""))
-            pending_approval = data.get("pending_approval")
-            self._pending_approval = (
-                pending_approval if isinstance(pending_approval, dict) else None
+            self._last_verification_kind = (
+                None
+                if working.verification_kind is None
+                else VerificationKind(working.verification_kind)
             )
-            self._phase = data.get("phase", "IDLE")
-            self._plan_text = data.get("plan", "")
-            self._history_summary = str(data.get("history_summary", ""))
-            self._restore_runtime_state(data)
-            return messages if isinstance(messages, list) and messages else None
-        except json.JSONDecodeError:
-            self.console.print(
-                "[yellow]会话文件格式不完整，已忽略损坏历史并创建新会话。[/yellow]"
-            )
-            return None
-        except OSError:
-            return None
+        except ValueError:
+            self._last_verification_kind = None
+        self._verification_done = working.verification_done
+        self._verification_passed = working.verification_passed
+        self._last_diff_summary = working.last_diff_summary
+        self._verification_unresolved_error = bool(working.unresolved_issue)
+
+    @property
+    def _phase(self) -> str:
+        return self.memory.working_memory.phase
+
+    @_phase.setter
+    def _phase(self, value: str) -> None:
+        self.memory.working_memory.phase = str(value)
+
+    @property
+    def _plan_text(self) -> str:
+        return self.memory.working_memory.plan_text
+
+    @_plan_text.setter
+    def _plan_text(self, value: str) -> None:
+        self.memory.working_memory.plan_text = str(value)
+
+    @property
+    def _current_task(self) -> str:
+        return self.memory.working_memory.current_task
+
+    @_current_task.setter
+    def _current_task(self, value: str) -> None:
+        self.memory.working_memory.current_task = str(value)
+
+    @property
+    def _history_summary(self) -> str:
+        return self.memory.working_memory.history_summary
+
+    @_history_summary.setter
+    def _history_summary(self, value: str) -> None:
+        self.memory.working_memory.history_summary = str(value)
+
+    @property
+    def _last_verification_command(self) -> str:
+        return self.memory.working_memory.last_verification_command
+
+    @_last_verification_command.setter
+    def _last_verification_command(self, value: str) -> None:
+        self.memory.working_memory.last_verification_command = str(value)
+
+    @property
+    def _verification_done(self) -> bool:
+        return self.memory.working_memory.verification_done
+
+    @_verification_done.setter
+    def _verification_done(self, value: bool) -> None:
+        self.memory.working_memory.verification_done = bool(value)
+
+    @property
+    def _verification_passed(self) -> bool:
+        return self.memory.working_memory.verification_passed
+
+    @_verification_passed.setter
+    def _verification_passed(self, value: bool) -> None:
+        self.memory.working_memory.verification_passed = bool(value)
+
+    @property
+    def _last_diff_summary(self) -> str:
+        return self.memory.working_memory.last_diff_summary
+
+    @_last_diff_summary.setter
+    def _last_diff_summary(self, value: str) -> None:
+        self.memory.working_memory.last_diff_summary = str(value)
+
+    @property
+    def _verification_unresolved_error(self) -> bool:
+        return bool(self.memory.working_memory.unresolved_issue)
+
+    @_verification_unresolved_error.setter
+    def _verification_unresolved_error(self, value: bool) -> None:
+        self.memory.working_memory.unresolved_issue = (
+            "verification environment or command error" if value else ""
+        )
 
     def _restore_runtime_state(self, data: dict[str, Any]) -> None:
         controller_state = data.get("controller")
@@ -1518,7 +1623,7 @@ class CodingAgent:
 
     def index_workspace(self) -> str:
         self.workspace.ensure_exists()
-        return self.retriever.index_workspace()
+        return self.memory.code_retriever.index_workspace()
 
     def _initial_messages(self, task: str, retrieval_context: RetrievalContext) -> list[dict[str, Any]]:
         return [
