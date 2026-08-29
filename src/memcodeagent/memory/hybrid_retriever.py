@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass, field
@@ -24,12 +25,35 @@ _STOPWORDS = {
 _MAX_RECORDS = 200
 _MAX_RETRIEVED_TASK = 3
 _MAX_RETRIEVED_CODE = 5
+_FALLBACK_VECTOR_DIM = 64
 
 
 def _tokenize(text: str) -> list[str]:
     """Tokenize text for BM25 (returns list to preserve frequency)."""
     words = re.findall(r"[A-Za-z0-9_./\\-]+", text.lower())
     return [w for w in words if len(w) > 2 and w not in _STOPWORDS]
+
+
+class _FallbackEmbeddingModel:
+    """Tiny local embedding fallback used when sentence-transformers is unavailable."""
+
+    def encode(
+        self,
+        texts: list[str] | str,
+        convert_to_numpy: bool = True,
+        show_progress_bar: bool = False,
+    ) -> np.ndarray | list[list[float]]:
+        if isinstance(texts, str):
+            texts = [texts]
+        vectors = np.zeros((len(texts), _FALLBACK_VECTOR_DIM), dtype=np.float32)
+        for row, text in enumerate(texts):
+            for token in _tokenize(text):
+                digest = hashlib.md5(token.encode("utf-8")).digest()
+                index = int.from_bytes(digest[:4], "big") % _FALLBACK_VECTOR_DIM
+                vectors[row, index] += 1.0
+        if convert_to_numpy:
+            return vectors
+        return vectors.tolist()
 
 
 @dataclass(slots=True)
@@ -88,9 +112,13 @@ class HybridRetriever:
 
     def _ensure_model(self) -> "SentenceTransformer":
         if self._model is None:
-            # Lazy import: only load sentence_transformers when actually needed
-            from sentence_transformers import SentenceTransformer
-            self._model = SentenceTransformer(self.model_name)
+            try:
+                # Lazy import: only load sentence_transformers when actually needed.
+                from sentence_transformers import SentenceTransformer
+
+                self._model = SentenceTransformer(self.model_name)
+            except Exception:
+                self._model = _FallbackEmbeddingModel()  # type: ignore[assignment]
         return self._model
 
     # -- indexing --------------------------------------------------------------

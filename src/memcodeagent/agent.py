@@ -309,23 +309,22 @@ class CodingAgent:
         error_retry_count = 0
         last_error_detected = False
         for _ in range(self.config.max_steps):
-            try:
-                result = self.controller.step(
-                    messages,
-                    tool_context=lambda call: {
-                        "phase": "IMPLEMENTING",
-                        "approval_required": self.config.approval_required,
-                        "protected_test": self._is_protected_test_edit(call.name, call.args),
-                    },
-                )
-            except (RuntimeError, KeyboardInterrupt):
-                self.controller.mark_budget_exhausted()
+            result = self._run_model_turn(
+                messages,
+                tool_context=lambda call: {
+                    "phase": "IMPLEMENTING",
+                    "approval_required": self.config.approval_required,
+                    "protected_test": self._is_protected_test_edit(call.name, call.args),
+                },
+            )
+            if result is None:
+                if self.controller.interrupted:
+                    last_result = "任务已被用户中断。"
+                    break
                 last_result = "任务尚未完成，已暂停。"
                 break
-            self._record_usage(result.decision)
             last_result = self._strip_tool_protocol(result.decision.content or last_result)
             if result.interrupted:
-                self.controller.mark_interrupted()
                 last_result = "任务已被用户中断。"
                 break
             changed = any(
@@ -488,6 +487,51 @@ class CodingAgent:
             self.console.print(f"[green]✓ Error fixed after {error_retry_count} attempt(s). Counter reset.[/green]")
             return 0, False, False
         return error_retry_count, last_error_detected, False
+
+    def _run_model_turn(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        before_tools: Callable[[Any], None] | None = None,
+        tool_context: Callable[[Any], dict[str, Any]] | None = None,
+        stream: bool = False,
+        on_chunk: Callable[[str], None] | None = None,
+    ) -> ControllerStep | None:
+        """Run one model decision and its local tool calls."""
+        try:
+            if stream:
+                result = self.controller.step(
+                    messages,
+                    before_tools=before_tools,
+                    tool_context=tool_context,
+                    stream=True,
+                    on_chunk=on_chunk,
+                )
+                if result.decision.content and on_chunk is None:
+                    print()
+            else:
+                if isinstance(self.console, Console):
+                    with Status("[cyan]Thinking...[/cyan]", console=self.console):
+                        result = self.controller.step(
+                            messages,
+                            before_tools=before_tools,
+                            tool_context=tool_context,
+                        )
+                else:
+                    result = self.controller.step(
+                        messages,
+                        before_tools=before_tools,
+                        tool_context=tool_context,
+                    )
+        except RuntimeError:
+            self.controller.mark_budget_exhausted()
+            return None
+        except KeyboardInterrupt:
+            self.controller.mark_interrupted()
+            return None
+
+        self._record_usage(result.decision)
+        return result
 
     def _run_verification_tests(self, messages: list[dict[str, Any]]) -> bool:
         """Run the project's test suite after a code-modifying tool call and feed the
@@ -719,48 +763,42 @@ class CodingAgent:
                         "duplicate": duplicate,
                     }
 
-                try:
-                    if self.streaming_mode:
-                        self.console.print("[green]Streaming:[/green]")
+                if self.streaming_mode:
+                    self.console.print("[green]Streaming:[/green]")
 
-                        def _on_chunk(text: str) -> None:
-                            print(text, end="", flush=True)
+                    def _on_chunk(text: str) -> None:
+                        print(text, end="", flush=True)
 
-                        result = self.controller.step(
-                            messages,
-                            before_tools=before_tools,
-                            tool_context=tool_context,
-                            stream=True,
-                            on_chunk=_on_chunk,
-                        )
-                        if result.decision.content:
-                            print()
-                    else:
-                        with Status("[cyan]Thinking...[/cyan]", console=self.console):
-                            result = self.controller.step(
-                                messages,
-                                before_tools=before_tools,
-                                tool_context=tool_context,
-                            )
-                except RuntimeError:
-                    self.controller.mark_budget_exhausted()
-                    self._print_agent_event(
-                        AgentEventKind.PAUSED,
-                        "任务尚未完成，已暂停",
-                        f"已执行 {self.config.max_steps}/{self.config.max_steps} 步；可继续执行",
+                    result = self._run_model_turn(
+                        messages,
+                        before_tools=before_tools,
+                        tool_context=tool_context,
+                        stream=True,
+                        on_chunk=_on_chunk,
                     )
-                    self._phase = "PAUSED"
-                    self._save_session(messages)
-                    return
-
-                if result.interrupted:
-                    self._print_agent_event(AgentEventKind.PAUSED, "任务已中断", "已保存当前状态")
+                    if result is not None and result.decision.content:
+                        print()
+                else:
+                    result = self._run_model_turn(
+                        messages,
+                        before_tools=before_tools,
+                        tool_context=tool_context,
+                    )
+                if result is None:
+                    if self.controller.interrupted:
+                        self._print_agent_event(AgentEventKind.PAUSED, "任务已中断", "已保存当前状态")
+                    else:
+                        self.controller.mark_budget_exhausted()
+                        self._print_agent_event(
+                            AgentEventKind.PAUSED,
+                            "任务尚未完成，已暂停",
+                            f"已执行 {self.config.max_steps}/{self.config.max_steps} 步；可继续执行",
+                        )
                     self._phase = "PAUSED"
                     self._save_session(messages)
                     return
 
                 decision = result.decision
-                self._record_usage(decision)
                 if self.controller.last_progress_alert is not None and self.controller.last_progress_alert.kind == "final_repetition":
                     alert = self.controller.last_progress_alert
                     self._print_agent_event(AgentEventKind.ALERT, "重复回答检测", alert.message)
