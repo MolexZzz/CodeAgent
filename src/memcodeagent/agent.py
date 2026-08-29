@@ -185,28 +185,12 @@ class CodingAgent:
         self._last_completion_report = ""
 
     def run(self, task: str) -> str:
-        """Single-turn execution: retrieve context, run agent loop, persist memory."""
-        intent = self._resolve_intent(task)
-        if intent is None:
-            return "任务已暂停：未确认本次请求是只读分析、制定计划还是直接修改。"
-        self.console.print(
-            f"[dim]任务模式：{intent.mode.value}（{intent.reason}）[/dim]"
-        )
-
+        """Single-turn execution through the normal ReAct loop."""
         self.workspace.ensure_exists()
         retrieval_context = self.retriever.retrieve(task)
         self._print_context(retrieval_context)
 
         messages = self._initial_messages(task, retrieval_context)
-        if intent.mode in {TaskMode.ANSWER, TaskMode.PLAN}:
-            result = self._run_read_only_interactive(
-                messages,
-                intent.mode,
-                task,
-                display_final=False,
-            )
-            return result or "只读任务已暂停，尚未生成最终回答。"
-
         result = self._run_loop(messages, task)
         return result
 
@@ -227,7 +211,8 @@ class CodingAgent:
         # Setup autocomplete for slash commands
         slash_commands = [
             "/help", "/exit", "/quit", "/clear", "/history",
-            "/model", "/models", "/verbose", "/workspace", "/context", "/tokens", "/streaming", "/plan", "/cache", "/save"
+            "/model", "/models", "/verbose", "/workspace", "/context", "/tokens",
+            "/streaming", "/plan", "/explain", "/cache", "/save"
         ]
         completer = WordCompleter(slash_commands, ignore_case=True, sentence=True)
         session = PromptSession(completer=completer)
@@ -283,31 +268,34 @@ class CodingAgent:
                 self._save_session(messages)
                 self.console.print("[green]Session saved.[/green]")
                 continue
-            elif user_input.startswith("/plan"):
-                request = user_input[5:].strip()
+            elif user_input == "/plan" or user_input.startswith("/plan "):
+                request = user_input[len("/plan"):].strip()
                 if not request:
                     self.console.print("[yellow]用法：/plan <要规划的任务>。不会读取或修改文件。[/yellow]")
                 else:
                     self._run_plan(request, messages)
                 continue
+            elif user_input == "/explain" or user_input.startswith("/explain "):
+                request = user_input[len("/explain"):].strip()
+                if not request:
+                    self.console.print("[yellow]用法：/explain <要解释的问题>。不会修改文件。[/yellow]")
+                else:
+                    messages.append({"role": "user", "content": request})
+                    self._run_read_only_interactive(
+                        messages,
+                        TaskMode.ANSWER,
+                        request,
+                    )
+                    self._save_session(messages)
+                continue
             elif user_input.startswith("/"):
                 self.console.print(f"[red]Unknown command: {user_input}[/red] (type /help for a list)")
                 continue
 
-            # Regular user message: add to conversation and run agent loop.
+            # Ordinary messages always use the model-driven ReAct loop.
             messages.append({"role": "user", "content": user_input})
             self._save_session(messages)
-            intent = self._resolve_intent(user_input)
-            if intent is None:
-                self.console.print("[yellow]任务已暂停：请重新说明是只读分析、制定计划还是直接修改。[/yellow]")
-                continue
-            self.console.print(
-                f"[dim]任务模式：{intent.mode.value}（{intent.reason}）[/dim]"
-            )
-            if intent.mode in {TaskMode.ANSWER, TaskMode.PLAN}:
-                self._run_read_only_interactive(messages, intent.mode, user_input)
-            else:
-                self._run_loop_interactive(messages)
+            self._run_loop_interactive(messages)
             self._save_session(messages)
 
     def _run_loop(self, messages: list[dict[str, Any]], task: str) -> str:
@@ -317,6 +305,7 @@ class CodingAgent:
         self._stop_requested = False
         self._phase = "IMPLEMENTING"
         last_result = ""
+        has_changes = False
         for _ in range(self.config.max_steps):
             try:
                 result = self.controller.step(
@@ -342,6 +331,7 @@ class CodingAgent:
                 for call, obs in zip(result.decision.tool_calls, result.observations)
             )
             if changed:
+                has_changes = True
                 self._run_verification_tests(messages)
                 if self._verification_unresolved_error:
                     self.controller.mark_blocked("verification environment error")
@@ -352,6 +342,11 @@ class CodingAgent:
                 self.controller.mark_test_result(self._verification_passed)
                 self.controller.mark_modify_completed()
             if result.decision.is_final:
+                if not has_changes:
+                    self.retriever.remember_task(task, last_result)
+                    self._phase = "COMPLETED"
+                    self._save_session(messages)
+                    return last_result
                 if self._final_completion_checks(messages):
                     self.retriever.remember_task(task, last_result)
                     self._phase = "COMPLETED"
@@ -534,12 +529,13 @@ class CodingAgent:
             "role": "system",
             "content": (
                 f"当前任务模式是 {mode.value}。你可以使用只读工具 list_files、read_file、"
-                "search_text、summarize_tree、diff_summary 来理解仓库。不要调用 write_file、"
-                "apply_patch 或 run_command。"
+                "search_text、summarize_tree、diff_summary，也可以在需要时使用 run_command 来检查环境或查看结果。"
+                "不要调用 write_file 或 apply_patch。"
                 if mode == TaskMode.ANSWER
                 else
                 f"当前任务模式是 {mode.value}。你可以使用只读工具 list_files、read_file、"
-                "search_text、summarize_tree、diff_summary 来形成方案。不要修改文件、不要运行命令。"
+                "search_text、summarize_tree、diff_summary，也可以在需要时使用 run_command 来辅助分析。"
+                "不要修改文件。"
                 "最终回答必须是具体计划，包含目标理解、相关文件、修改步骤、风险和验证建议。"
             ),
         }
@@ -590,7 +586,8 @@ class CodingAgent:
 
             for tool_call in decision.tool_calls:
                 call_key = (tool_call.name, json.dumps(tool_call.args, sort_keys=True, ensure_ascii=False))
-                if tool_call.name not in _READ_ONLY_TOOLS:
+                allowed_tools = _READ_ONLY_TOOLS | {"run_command"}
+                if tool_call.name not in allowed_tools:
                     observation = ToolObservation(
                         tool_call.name,
                         False,
@@ -636,8 +633,6 @@ class CodingAgent:
     def _run_loop_interactive(self, messages: list[dict[str, Any]]) -> None:
         """Core agent loop for interactive mode: uses per-error retry counter."""
         self.controller.handle_user_request("MODIFY", messages)
-        if self._should_plan(messages) and not self._prepare_task(messages):
-            return
 
         error_retry_count = 0
         last_error_detected = False
@@ -1070,28 +1065,8 @@ class CodingAgent:
         )
 
     def _resolve_intent(self, text: str) -> IntentResolution | None:
-        """Resolve an intent and ask before guessing when confidence is low."""
-        intent = IntentRouter.resolve(text)
-        if intent.confidence != "low":
-            return intent
-
-        choices = {
-            "只分析并回答（不修改文件）": TaskMode.ANSWER,
-            "先制定修改计划（不修改文件）": TaskMode.PLAN,
-            "直接修改并验证": TaskMode.MODIFY,
-        }
-        try:
-            selected = questionary.select(
-                "这次希望我怎么处理？",
-                choices=list(choices),
-            ).ask()
-        except (KeyboardInterrupt, EOFError):
-            return None
-
-        mode = choices.get(selected)
-        if mode is None:
-            return None
-        return IntentResolution(mode, "clarified", f"用户已明确选择 {mode.value} 模式")
+        """Resolve an intent automatically from the user's text."""
+        return IntentRouter.resolve(text)
 
     @staticmethod
     def _summarize_test_output(content: str, limit: int = 2000) -> str:
@@ -1420,6 +1395,7 @@ class CodingAgent:
             ("/context", "Show sliding-window context stats (turns/tokens kept vs total)"),
             ("/tokens", "Show session-level token usage statistics"),
             ("/plan [task]", "Plan only; do not call tools or modify files"),
+            ("/explain [question]", "Read-only explanation; do not modify files"),
             ("/cache", "Show context compression and session persistence status"),
             ("/save", "Persist the current conversation immediately"),
         ]

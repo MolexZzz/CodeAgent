@@ -78,30 +78,9 @@ class ToolPolicy:
                 PolicyAction.DENY,
                 "Duplicate tool call suppressed; use a different path, range, query, or command.",
             )
-        if phase in {"PLANNING", "COMPLETED", "PAUSED"}:
-            return PolicyDecision(
-                PolicyAction.DENY,
-                f"当前阶段不允许调用 {tool_name}。",
-            )
-        if phase in {"EXPLORING", "INSPECTING"} and tool_name not in self.READ_ONLY:
-            return PolicyDecision(
-                PolicyAction.DENY,
-                f"当前阶段只允许只读工具，{tool_name} 已被拒绝。",
-            )
-        if phase in {"TESTING", "VERIFYING"} and tool_name not in (
-            self.READ_ONLY | {"run_command"}
-        ):
-            return PolicyDecision(
-                PolicyAction.DENY,
-                f"当前验证阶段不允许调用 {tool_name}。",
-            )
-        if phase in {"IMPLEMENTING", "FIXING"} and tool_name not in (
-            self.READ_ONLY | self.EDIT_TOOLS | {"run_command"}
-        ):
-            return PolicyDecision(
-                PolicyAction.DENY,
-                f"当前实现阶段不允许调用 {tool_name}。",
-            )
+        # Runtime phases describe the agent's current activity for display and
+        # persistence. They must not decide whether the model may inspect,
+        # edit, or verify: ReAct tasks can move between those actions freely.
         if tool_name in self.CONFIRM_TOOLS and approval_required:
             if tool_name == "run_command":
                 risk, explanation = self.command_risk(command)
