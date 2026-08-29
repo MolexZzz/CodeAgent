@@ -317,6 +317,9 @@ class CodingAgent:
         last_error_detected = False
         seen_calls: set[tuple[str, str]] = set()
         for _ in range(self.config.max_steps):
+            # Duplicate protection applies within one model turn. A later
+            # identical command may be a valid retry after an edit or failure.
+            seen_calls.clear()
             result = self._run_model_turn(
                 messages,
                 tool_context=lambda call: {
@@ -343,9 +346,7 @@ class CodingAgent:
                 self.controller.last_progress_alert = None
                 if progress_alert.kind in {
                     "duplicate_tool",
-                    "tool_monotony",
                     "no_progress",
-                    "phase_monotony",
                     "final_repetition",
                 }:
                     last_result = (
@@ -354,6 +355,16 @@ class CodingAgent:
                     self._phase = "PAUSED"
                     self._save_session(messages)
                     return last_result
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Runtime progress warning: {progress_alert.message} "
+                            "This is only a warning; continue if the current exploration "
+                            "is producing new information, otherwise choose a different action."
+                        ),
+                    }
+                )
             changed = any(
                 obs.ok and call.name in _CODE_EDIT_TOOLS
                 for call, obs in zip(result.decision.tool_calls, result.observations)

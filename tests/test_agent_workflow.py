@@ -282,6 +282,14 @@ def test_progress_monitor_detects_duplicate_and_monotony() -> None:
     assert monotony.kind == "tool_monotony"
 
 
+def test_progress_monitor_allows_retry_after_an_intervening_tool() -> None:
+    monitor = ProgressMonitor(duplicate_limit=1)
+
+    assert monitor.record_tool("run_command", {"command": "mvn test"}) is None
+    assert monitor.record_tool("apply_patch", {"path": "src/App.java"}) is None
+    assert monitor.record_tool("run_command", {"command": "mvn test"}) is None
+
+
 def test_progress_monitor_detects_no_progress() -> None:
     monitor = ProgressMonitor(no_progress_limit=2)
     snapshot = ProgressSnapshot()

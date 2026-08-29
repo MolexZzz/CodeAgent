@@ -48,6 +48,7 @@ class ProgressMonitor:
         self.phase_monotony_limit = max(2, phase_monotony_limit)
         self._calls: Counter[tuple[str, str]] = Counter()
         self._recent_tools: deque[str] = deque(maxlen=self.tool_window)
+        self._last_call_key: tuple[str, str] | None = None
         self._recent_phases: deque[str] = deque(maxlen=self.phase_window)
         self._last_snapshot = ProgressSnapshot()
         self._no_progress_steps = 0
@@ -62,7 +63,9 @@ class ProgressMonitor:
         key = self.call_key(name, args)
         self._calls[key] += 1
         self._recent_tools.append(name)
-        if self._calls[key] > self.duplicate_limit:
+        is_immediate_duplicate = key == self._last_call_key
+        self._last_call_key = key
+        if is_immediate_duplicate and self._calls[key] > self.duplicate_limit:
             return ProgressAlert(
                 "duplicate_tool",
                 f"检测到重复调用 {name}，参数完全相同；已暂停本次重复操作。",
@@ -163,6 +166,7 @@ class ProgressMonitor:
     def reset(self) -> None:
         self._calls.clear()
         self._recent_tools.clear()
+        self._last_call_key = None
         self._last_snapshot = ProgressSnapshot()
         self._no_progress_steps = 0
         self._snapshot = ProgressSnapshot()

@@ -12,3 +12,12 @@ venv/
 .memcode/
 dist/
 build/
+
+# Local planning and development notes
+dev_docs/
+docs/
+/plan.md
+
+# Tests are kept under tests/
+/test_cli_ux.md
+/test_model_commands.py
