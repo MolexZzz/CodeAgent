@@ -2,6 +2,7 @@ from pathlib import Path
 
 import typer
 from rich.console import Console
+from rich.markdown import Markdown
 
 from memcodeagent.agent import AgentConfig, CodingAgent
 
@@ -41,7 +42,7 @@ def run(
     agent = CodingAgent(config=config, console=console)
     result = agent.run(task)
     console.rule("[bold green]Final")
-    console.print(result)
+    console.print(Markdown(result))
 
 
 @app.command()

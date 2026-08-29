@@ -11,6 +11,7 @@ import questionary
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import WordCompleter
 from rich.console import Console
+from rich.markdown import Markdown
 from rich.status import Status
 
 from memcodeagent.context_manager import ContextManager
@@ -187,6 +188,7 @@ class CodingAgent:
         self._last_verification_command = ""
         self._last_completion_report = ""
         self._current_task = ""
+        self._history_summary = ""
         self._pending_approval: dict[str, Any] | None = None
 
     def run(self, task: str) -> str:
@@ -241,8 +243,11 @@ class CodingAgent:
                 self._save_session(messages)
                 self.console.print("[yellow]Conversation cleared.[/yellow]")
                 continue
-            elif user_input == "/history":
+            elif user_input == "/history" or user_input == "/history --summary":
                 self._print_history(messages)
+                continue
+            elif user_input == "/history --raw":
+                self._print_history(messages, raw=True)
                 continue
             elif user_input == "/help":
                 self._print_help()
@@ -450,6 +455,7 @@ class CodingAgent:
     def _reset_task_state(self) -> None:
         """Clear per-request verification and progress state before a new task."""
         self._stop_requested = False
+        self._history_summary = ""
         self._phase = "IDLE"
         self._verification_done = False
         self._verification_passed = False
@@ -740,7 +746,7 @@ class CodingAgent:
             if decision.is_final:
                 content = self._clean_display_text(decision.content or "(empty response)")
                 if display_final and not self.streaming_mode:
-                    self.console.print(f"[green]{content}[/green]")
+                    self.console.print(Markdown(content))
                 messages.append({"role": "assistant", "content": content})
                 self._phase = "COMPLETED"
                 self.retriever.remember_task(request, content)
@@ -802,7 +808,7 @@ class CodingAgent:
         task = user_messages[-1] if user_messages else ""
         result = self._run_loop(messages, task)
         if result:
-            self.console.print(f"[green]{result}[/green]")
+            self.console.print(Markdown(result))
 
     def _run_loop_interactive_legacy(self, messages: list[dict[str, Any]]) -> None:
         """Core agent loop for interactive mode: uses per-error retry counter."""
@@ -1435,6 +1441,7 @@ class CodingAgent:
             "pending_approval": self._pending_approval,
             "phase": self._phase,
             "plan": self._plan_text,
+            "history_summary": self._history_summary,
             "controller": self.controller.persist_state(),
             "verification": {
                 "done": self._verification_done,
@@ -1471,6 +1478,7 @@ class CodingAgent:
             )
             self._phase = data.get("phase", "IDLE")
             self._plan_text = data.get("plan", "")
+            self._history_summary = str(data.get("history_summary", ""))
             self._restore_runtime_state(data)
             return messages if isinstance(messages, list) and messages else None
         except json.JSONDecodeError:
@@ -1576,8 +1584,11 @@ class CodingAgent:
         self.console.rule("[bold cyan]Retrieved Context")
         self.console.print(retrieval_context.to_display())
 
-    def _print_history(self, messages: list[dict[str, Any]]) -> None:
-        self.console.rule("[bold cyan]Conversation Summary")
+    def _print_history(self, messages: list[dict[str, Any]], *, raw: bool = False) -> None:
+        if not raw:
+            self._print_history_summary(messages)
+            return
+        self.console.rule("[bold cyan]Raw Conversation History")
         self.console.print("[dim]只显示用户消息、最终回复和工具摘要；完整原始内容保存在 session.json。[/dim]")
         for msg in messages:
             role = msg.get("role", "unknown")
@@ -1587,16 +1598,101 @@ class CodingAgent:
             if role == "user" and content.startswith("Automated test verification"):
                 self.console.print(f"[dim]VERIFICATION: {content.splitlines()[0]}[/dim]")
             elif role == "user":
-                self.console.print(f"[cyan]USER:[/cyan] {self._clip(content, 240)}")
+                self.console.print("[cyan]USER:[/cyan]")
+                self.console.print(Markdown(self._clip(content, 1200)))
             elif role == "assistant":
                 tool_calls = msg.get("tool_calls")
                 if tool_calls:
                     names = [tc.get("function", {}).get("name", "unknown") for tc in tool_calls]
                     self.console.print(f"[yellow]TOOLS:[/yellow] {', '.join(names)}")
                 else:
-                    self.console.print(f"[green]ASSISTANT:[/green] {self._clip(content, 600)}")
+                    self.console.print("[green]ASSISTANT:[/green]")
+                    self.console.print(Markdown(self._clip(content, 1600)))
             elif role == "tool":
-                self.console.print(f"[dim]TOOL RESULT:[/dim] {self._clip(content, 180)}")
+                self.console.print("[dim]TOOL RESULT:[/dim]")
+                self.console.print(Markdown(self._clip(content, 800)))
+
+    def _print_history_summary(self, messages: list[dict[str, Any]]) -> None:
+        self.console.rule("[bold cyan]Task Summary")
+
+        task = self._current_task.strip()
+        if not task:
+            user_messages = [
+                self._clean_display_text(message.get("content", "")).strip()
+                for message in messages
+                if message.get("role") == "user"
+                and not str(message.get("content", "")).startswith(
+                    ("Automated test verification", "Runtime ")
+                )
+            ]
+            task = user_messages[-1] if user_messages else "(no active task)"
+
+        self.console.print("[bold]Current task[/bold]")
+        self.console.print(self._clip(task, 500))
+        self.console.print()
+        self.console.print("[bold]Task summary[/bold]")
+        summary = self._history_summary or self.context_manager.summarize_recent(messages)
+        if summary:
+            self._history_summary = summary
+            self.console.print(Markdown(summary))
+        else:
+            self.console.print(self._local_history_summary(messages))
+
+        actions: list[str] = []
+        for message in messages:
+            if message.get("role") != "assistant":
+                continue
+            for tool_call in message.get("tool_calls") or []:
+                function = tool_call.get("function", {})
+                name = function.get("name", "unknown")
+                args = function.get("arguments", {})
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except json.JSONDecodeError:
+                        args = {}
+                target = self._tool_target(name, args if isinstance(args, dict) else {})
+                actions.append(f"{name}{target}")
+
+        self.console.print()
+        self.console.print("[bold]Recent actions[/bold]")
+        for action in actions[-8:] or ["(none)"]:
+            self.console.print(f"- {action}")
+
+        unresolved: list[str] = []
+        for message in messages:
+            content = self._clean_display_text(message.get("content", ""))
+            if message.get("role") == "tool" and content.startswith("(error)"):
+                unresolved.append(self._clip(content, 300))
+            elif content.startswith("Automated test verification: FAILED"):
+                unresolved.append(self._clip(content.splitlines()[0], 300))
+        if self._verification_unresolved_error:
+            unresolved.append("测试环境或测试命令存在未解决的问题。")
+        if self._phase == "PAUSED" and not unresolved:
+            unresolved.append("任务当前处于暂停状态，可能仍有未完成工作。")
+
+        self.console.print()
+        self.console.print("[bold]Unresolved issues[/bold]")
+        for issue in unresolved[-5:] or ["(none)"]:
+            self.console.print(f"- {issue}")
+
+    def _local_history_summary(self, messages: list[dict[str, Any]]) -> str:
+        """Provide a readable fallback when no summarization model is available."""
+        completed = [
+            self._clean_display_text(message.get("content", "")).strip()
+            for message in messages
+            if message.get("role") == "assistant"
+            and message.get("content")
+            and not message.get("tool_calls")
+        ]
+        lines = [
+            f"- 当前阶段：{self._phase}",
+            f"- 最近结果：{self._clip(completed[-1], 500) if completed else '暂无'}",
+        ]
+        if self._last_verification_command:
+            status = "通过" if self._verification_passed else "未通过"
+            lines.append(f"- 测试：{self._last_verification_command}（{status}）")
+        return "\n".join(lines)
 
     @staticmethod
     def _clean_display_text(value: Any) -> str:
@@ -1615,7 +1711,8 @@ class CodingAgent:
             ("/help", "Show this help message"),
             ("/exit, /quit", "Exit the REPL"),
             ("/clear", "Clear conversation history and start fresh"),
-            ("/history", "Show the full conversation history"),
+            ("/history", "Show the current task summary"),
+            ("/history --raw", "Show the raw conversation and tool log"),
             ("/model", "Show current model and open an interactive menu to switch"),
             ("/model <name>", "Switch to a different model, e.g. /model deepseek-chat"),
             ("/models", "List preset models available for selection"),

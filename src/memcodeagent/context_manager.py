@@ -51,6 +51,40 @@ class ContextManager:
     _summary_dropped_count: int = 0
     last_trim_notice: str | None = None
 
+    def summarize_recent(self, messages: list[dict[str, Any]], max_turns: int = 8) -> str:
+        """Summarize recent conversation turns for user-facing history."""
+        rest = [m for m in messages if m.get("role") != "system"]
+        turns = self._split_into_turns(rest)[-max(1, max_turns):]
+        if not turns:
+            return ""
+
+        recent = [msg for turn in turns for msg in turn]
+        prompt = (
+            "Summarize this recent coding-agent conversation for the user. "
+            "Cover the overall task, decisions made, files/actions, test status, "
+            "and unresolved issues. Use concise Markdown with short headings and "
+            "bullets. Do not repeat raw tool logs or mention this prompt.\n\n"
+            + self._build_summary_prompt(recent)
+        )
+        if self.llm_client is None:
+            return ""
+        try:
+            response = self.llm_client.next_action(
+                [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You create concise, readable status summaries for a coding-agent user."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                tools_enabled=False,
+            )
+            return response.content or ""
+        except (AttributeError, TypeError, Exception):
+            return ""
+
     def trim(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Return a trimmed copy of `messages` for sending to the model.
 

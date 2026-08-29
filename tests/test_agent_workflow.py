@@ -253,6 +253,64 @@ def test_agent_event_formatting_is_concise() -> None:
     assert format_agent_event(event) == "阶段：检查项目 — 步骤 1/4"
 
 
+def test_history_defaults_to_user_summary_and_supports_raw_mode(tmp_path: Path) -> None:
+    output = StringIO()
+    agent = CodingAgent(
+        AgentConfig(workspace=tmp_path),
+        console=Console(file=output),
+    )
+    messages = [
+        {"role": "user", "content": "修复登录并运行测试"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "function": {
+                        "name": "apply_patch",
+                        "arguments": '{"path":"src/app.py","edits":[]}',
+                    }
+                }
+            ],
+        },
+        {"role": "tool", "content": "(error) patch failed"},
+        {"role": "assistant", "content": "## 修复结果\n\n**仍有一个补丁需要修复。**"},
+    ]
+    agent._current_task = "修复登录并运行测试"
+
+    agent._print_history(messages)
+    summary_output = output.getvalue()
+    assert "Current task" in summary_output
+    assert "Recent actions" in summary_output
+    assert "Unresolved issues" in summary_output
+    assert "Raw Conversation History" not in summary_output
+
+    output.seek(0)
+    output.truncate(0)
+    agent._print_history(messages, raw=True)
+    raw_output = output.getvalue()
+    assert "Raw Conversation History" in raw_output
+    assert "TOOLS:" in raw_output
+    assert "## 修复结果" not in raw_output
+    assert "仍有一个补丁需要修复。" in raw_output
+
+
+def test_final_answer_is_rendered_as_markdown(tmp_path: Path) -> None:
+    output = StringIO()
+    agent = CodingAgent(
+        AgentConfig(workspace=tmp_path),
+        console=Console(file=output),
+    )
+    agent._run_loop = Mock(return_value="## Heading\n\n**important**")
+
+    agent._run_loop_interactive([{"role": "user", "content": "explain"}])
+
+    rendered = output.getvalue()
+    assert "Heading" in rendered
+    assert "important" in rendered
+    assert "## Heading" not in rendered
+
+
 def test_controller_policy_can_deny_without_executing_tool() -> None:
     class FakeObservation:
         ok = True
