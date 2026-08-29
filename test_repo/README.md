@@ -1,13 +1,14 @@
-# TicketDesk
+# Vending Machine
 
-TicketDesk 是一个面向内部团队的小型工单服务。项目按照日常软件项目的
-方式组织，包含数据访问层、业务服务层、命令行格式化工具、测试，以及产品
-需求文档。
+A small Java 17/Maven project used for testing an autonomous coding agent.
 
-## 快速开始
+The repository intentionally contains only a compilable skeleton. The behavior
+to implement is described in `docs/requirements.md`.
 
-```bash
-python -m pytest -q
-```
+Suggested first task for the coding agent:
 
-下一版本的维护需求位于 `docs/requirements.md`。
+> Read `docs/requirements.md`, complete the missing vending-machine behavior,
+> add unit tests, and run the Maven test suite.
+
+The second task can extend the completed machine with the optional feature
+described in the requirements document.
