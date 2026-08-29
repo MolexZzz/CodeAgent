@@ -108,7 +108,7 @@ def test_llm_client_passes_tools_to_api(mock_openai_class: MagicMock) -> None:
 
     call_args = mock_client.chat.completions.create.call_args
     assert call_args.kwargs["tools"] is not None
-    assert len(call_args.kwargs["tools"]) == 6  # All 6 tools
+    assert len(call_args.kwargs["tools"]) == 8  # All current tools
     assert call_args.kwargs["tool_choice"] == "auto"
 
 

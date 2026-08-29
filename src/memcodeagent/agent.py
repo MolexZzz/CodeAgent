@@ -306,6 +306,8 @@ class CodingAgent:
         self._phase = "IMPLEMENTING"
         last_result = ""
         has_changes = False
+        error_retry_count = 0
+        last_error_detected = False
         for _ in range(self.config.max_steps):
             try:
                 result = self.controller.step(
@@ -330,13 +332,15 @@ class CodingAgent:
                 obs.ok and call.name in _CODE_EDIT_TOOLS
                 for call, obs in zip(result.decision.tool_calls, result.observations)
             )
+            current_step_has_error = any(not getattr(obs, "ok", False) for obs in result.observations)
             if changed:
                 has_changes = True
-                self._run_verification_tests(messages)
+                test_failed = self._run_verification_tests(messages)
                 if self._verification_unresolved_error:
                     self.controller.mark_blocked("verification environment error")
                     last_result = "测试环境或命令错误，任务已暂停。"
                     break
+                current_step_has_error = current_step_has_error or test_failed
                 self.controller.mark_implementation_done()
                 self.controller.mark_diff_checked()
                 self.controller.mark_test_result(self._verification_passed)
@@ -352,6 +356,16 @@ class CodingAgent:
                     self._phase = "COMPLETED"
                     self._save_session(messages)
                     return last_result
+            error_retry_count, last_error_detected, should_stop = self._update_error_retry_state(
+                current_step_has_error,
+                error_retry_count,
+                last_error_detected,
+            )
+            if should_stop:
+                self.retriever.remember_task(task, f"Stopped after {error_retry_count} failed attempts to fix the error.")
+                self._phase = "PAUSED"
+                self._save_session(messages)
+                return f"Stopped after {error_retry_count} failed attempts to fix the error."
         self._phase = "PAUSED"
         self.retriever.remember_task(task, last_result)
         self._save_session(messages)
@@ -453,6 +467,27 @@ class CodingAgent:
         if (self.workspace.root / "tests").is_dir():
             return "python -m pytest tests/ -q --tb=short"
         return None
+
+    def _update_error_retry_state(
+        self,
+        current_step_has_error: bool,
+        error_retry_count: int,
+        last_error_detected: bool,
+    ) -> tuple[int, bool, bool]:
+        """Advance the step-level retry counters and report whether the loop should stop."""
+        if current_step_has_error:
+            if last_error_detected:
+                error_retry_count += 1
+            else:
+                error_retry_count = 1
+                last_error_detected = True
+            if error_retry_count >= self.config.max_error_retries:
+                return error_retry_count, last_error_detected, True
+            return error_retry_count, last_error_detected, False
+        if last_error_detected:
+            self.console.print(f"[green]✓ Error fixed after {error_retry_count} attempt(s). Counter reset.[/green]")
+            return 0, False, False
+        return error_retry_count, last_error_detected, False
 
     def _run_verification_tests(self, messages: list[dict[str, Any]]) -> bool:
         """Run the project's test suite after a code-modifying tool call and feed the
@@ -867,20 +902,22 @@ class CodingAgent:
                         self.controller.mark_test_result(True)
 
                 if current_step_has_error:
-                    if last_error_detected:
-                        error_retry_count += 1
-                    else:
-                        error_retry_count = 1
-                        last_error_detected = True
-
-                    if error_retry_count >= self.config.max_error_retries:
-                        self.console.print(f"[yellow]Stopped after {error_retry_count} failed attempts to fix the error.[/yellow]")
+                    error_retry_count, last_error_detected, should_stop = self._update_error_retry_state(
+                        True,
+                        error_retry_count,
+                        last_error_detected,
+                    )
+                    if should_stop:
+                        self.console.print(
+                            f"[yellow]Stopped after {error_retry_count} failed attempts to fix the error.[/yellow]"
+                        )
                         return
                 else:
-                    if last_error_detected:
-                        self.console.print(f"[green]✓ Error fixed after {error_retry_count} attempt(s). Counter reset.[/green]")
-                        error_retry_count = 0
-                        last_error_detected = False
+                    error_retry_count, last_error_detected, _ = self._update_error_retry_state(
+                        False,
+                        error_retry_count,
+                        last_error_detected,
+                    )
 
             self.controller.mark_budget_exhausted()
             self.console.print(f"[yellow]任务尚未完成，已暂停。已执行 {step}/{self.config.max_steps} 步。[/yellow]")

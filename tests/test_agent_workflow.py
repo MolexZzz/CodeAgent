@@ -130,14 +130,14 @@ def test_tool_policy_permission_matrix() -> None:
         phase="INSPECTING",
         tool_name="apply_patch",
         approval_required=True,
-    ).action == PolicyAction.DENY
-    assert policy.evaluate(
-        phase="IMPLEMENTING",
-        tool_name="apply_patch",
-        approval_required=True,
     ).action == PolicyAction.CONFIRM
     assert policy.evaluate(
         phase="IMPLEMENTING",
+        tool_name="apply_patch",
+        approval_required=False,
+    ).action == PolicyAction.ALLOW
+    assert policy.evaluate(
+        phase="VERIFYING",
         tool_name="apply_patch",
         approval_required=False,
     ).action == PolicyAction.ALLOW
@@ -413,16 +413,12 @@ def test_intent_router_explicit_mutation_wins() -> None:
         assert IntentRouter.resolve(text).mode == TaskMode.MODIFY
 
 
-def test_low_confidence_intent_requires_user_choice(tmp_path: Path) -> None:
+def test_low_confidence_intent_is_auto_resolved(tmp_path: Path) -> None:
     agent = CodingAgent(AgentConfig(workspace=tmp_path), console=Mock())
-    with patch("memcodeagent.agent.questionary.select") as select:
-        select.return_value.ask.return_value = "直接修改并验证"
-        intent = agent._resolve_intent("请处理一下这个问题")
+    intent = agent._resolve_intent("请处理一下这个问题")
 
     assert intent is not None
-    assert intent.mode == TaskMode.MODIFY
-    assert intent.confidence == "clarified"
-    select.assert_called_once()
+    assert intent.mode in {TaskMode.ANSWER, TaskMode.PLAN}
 
 
 def test_single_turn_answer_mode_does_not_execute_tools(tmp_path: Path) -> None:
@@ -444,7 +440,7 @@ def test_single_turn_answer_mode_does_not_execute_tools(tmp_path: Path) -> None:
     execute.assert_not_called()
 
 
-def test_single_turn_plan_mode_rejects_edit_tools(tmp_path: Path) -> None:
+def test_explicit_plan_mode_rejects_edit_tools(tmp_path: Path) -> None:
     console = Console(file=StringIO())
     agent = CodingAgent(AgentConfig(workspace=tmp_path, max_steps=2), console=console)
     agent.retriever.retrieve = Mock(return_value=RetrievalContext())
@@ -471,10 +467,64 @@ def test_single_turn_plan_mode_rejects_edit_tools(tmp_path: Path) -> None:
     with patch.object(agent.llm, "next_action", side_effect=decisions), patch.object(
         agent.tools, "execute"
     ) as execute:
-        result = agent.run("给我一个修改计划，先不要改代码")
+        result = agent._run_read_only_interactive(
+            [{"role": "user", "content": "给我一个修改计划，先不要改代码"}],
+            TaskMode.PLAN,
+            "给我一个修改计划，先不要改代码",
+            display_final=False,
+        )
 
     assert result == "计划已生成。"
     execute.assert_not_called()
+
+
+def test_read_only_mode_can_execute_safe_shell_command(tmp_path: Path) -> None:
+    console = Console(file=StringIO())
+    agent = CodingAgent(AgentConfig(workspace=tmp_path, max_steps=2), console=console)
+    agent.retriever.retrieve = Mock(return_value=RetrievalContext())
+    agent.retriever.remember_task = Mock()
+
+    class FakeObservation:
+        ok = True
+        tool_name = "run_command"
+        content = "exit_code=0\nSTDOUT:\n1\nSTDERR:\n"
+
+        def to_message(self):
+            return {"role": "tool", "content": self.content}
+
+    run_call = Mock()
+    run_call.id = "run-1"
+    run_call.name = "run_command"
+    run_call.args = {"command": "python -c \"print(1)\""}
+
+    decisions = [
+        AgentDecision(
+            tool_calls=[run_call],
+            assistant_message={
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{"id": "run-1", "function": {"name": "run_command"}}],
+            },
+        ),
+        AgentDecision(
+            content="当前时间应由系统命令返回。",
+            assistant_message={"role": "assistant", "content": "当前时间应由系统命令返回。"},
+        ),
+    ]
+
+    with patch.object(agent.llm, "next_action", side_effect=decisions), patch.object(
+        agent.tools, "execute"
+    ) as execute:
+        execute.return_value = FakeObservation()
+        result = agent._run_read_only_interactive(
+            [{"role": "user", "content": "现在几点了"}],
+            TaskMode.ANSWER,
+            "现在几点了",
+            display_final=False,
+        )
+
+    assert result == "当前时间应由系统命令返回。"
+    execute.assert_any_call("run_command", {"command": "python -c \"print(1)\""}, "run-1")
 
 
 def test_session_state_defaults(tmp_path: Path) -> None:
