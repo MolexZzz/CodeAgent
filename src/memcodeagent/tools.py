@@ -11,7 +11,7 @@ from memcodeagent.workspace import Workspace
 # How much file content to show back to the model when a patch edit fails to
 # match, so it can see why and retry with corrected text.
 _CONTEXT_SNIPPET_CHARS = 800
-_DEFAULT_READ_MAX_LINES = 400
+_DEFAULT_READ_MAX_LINES = 200
 _DEFAULT_READ_MAX_CHARS = 24000
 _DEFAULT_SEARCH_MAX_CHARS = 16000
 

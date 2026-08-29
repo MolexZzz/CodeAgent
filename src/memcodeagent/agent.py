@@ -315,6 +315,7 @@ class CodingAgent:
         has_changes = False
         error_retry_count = 0
         last_error_detected = False
+        seen_calls: set[tuple[str, str]] = set()
         for _ in range(self.config.max_steps):
             result = self._run_model_turn(
                 messages,
@@ -322,6 +323,7 @@ class CodingAgent:
                     "phase": "IMPLEMENTING",
                     "approval_required": self.config.approval_required,
                     "protected_test": self._is_protected_test_edit(call.name, call.args),
+                    "duplicate": self._is_duplicate_call(seen_calls, call),
                 },
             )
             if result is None:
@@ -330,10 +332,28 @@ class CodingAgent:
                     break
                 last_result = "任务尚未完成，已暂停。"
                 break
-            last_result = self._strip_tool_protocol(result.decision.content or last_result)
+            last_result = self._limit_response(
+                self._strip_tool_protocol(result.decision.content or last_result)
+            )
             if result.interrupted:
                 last_result = "任务已被用户中断。"
                 break
+            progress_alert = self.controller.last_progress_alert
+            if progress_alert is not None:
+                self.controller.last_progress_alert = None
+                if progress_alert.kind in {
+                    "duplicate_tool",
+                    "tool_monotony",
+                    "no_progress",
+                    "phase_monotony",
+                    "final_repetition",
+                }:
+                    last_result = (
+                        f"任务已暂停：{progress_alert.message}"
+                    )
+                    self._phase = "PAUSED"
+                    self._save_session(messages)
+                    return last_result
             changed = any(
                 obs.ok and call.name in _CODE_EDIT_TOOLS
                 for call, obs in zip(result.decision.tool_calls, result.observations)
@@ -391,6 +411,19 @@ class CodingAgent:
         self.retriever.remember_task(task, last_result)
         self._save_session(messages)
         return last_result or "任务尚未完成，已暂停。"
+
+    @staticmethod
+    def _is_duplicate_call(
+        seen_calls: set[tuple[str, str]],
+        tool_call: Any,
+    ) -> bool:
+        key = (
+            str(tool_call.name),
+            json.dumps(tool_call.args or {}, sort_keys=True, ensure_ascii=False),
+        )
+        duplicate = key in seen_calls
+        seen_calls.add(key)
+        return duplicate
 
     def _reset_task_state(self) -> None:
         """Clear per-request verification and progress state before a new task."""
@@ -552,18 +585,12 @@ class CodingAgent:
                     print()
             else:
                 if isinstance(self.console, Console):
-                    with Status("[cyan]Thinking...[/cyan]", console=self.console):
-                        result = self.controller.step(
-                            messages,
-                            before_tools=before_tools,
-                            tool_context=tool_context,
-                        )
-                else:
-                    result = self.controller.step(
-                        messages,
-                        before_tools=before_tools,
-                        tool_context=tool_context,
-                    )
+                    self.console.print("[dim]Thinking...[/dim]")
+                result = self.controller.step(
+                    messages,
+                    before_tools=before_tools,
+                    tool_context=tool_context,
+                )
         except RuntimeError:
             self.controller.mark_budget_exhausted()
             return None
@@ -1300,6 +1327,13 @@ class CodingAgent:
         cleaned = cleaned.replace("<tool-result>", "").replace("</tool-result>", "")
         return cleaned
 
+    @staticmethod
+    def _limit_response(text: str, limit: int = 12000) -> str:
+        """Keep abnormal model output from flooding the terminal or session UI."""
+        if len(text) <= limit:
+            return text
+        return text[:limit] + "\n...[final response truncated by runtime]"
+
     def _build_completion_report(self) -> str:
         parts: list[str] = []
         if self._last_diff_summary:
@@ -1327,8 +1361,13 @@ class CodingAgent:
         try:
             reason = getattr(policy, "reason", "") if policy is not None else ""
             suffix = f" ({reason})" if reason else ""
+            self.console.print()
+            self.console.print("[bold yellow]Approval required[/bold yellow]")
+            self.console.print(
+                f"[yellow]{self._tool_summary(name, args)}{suffix}[/yellow]"
+            )
             answer = questionary.confirm(
-                f"Approve {self._tool_summary(name, args)}{suffix}?",
+                "Allow this operation? (yes/no)",
                 default=False,
             ).ask()
             return bool(answer)

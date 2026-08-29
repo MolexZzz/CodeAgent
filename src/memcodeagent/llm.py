@@ -47,7 +47,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "name": "read_file",
             "description": (
                 "Read a bounded section of a text file inside the workspace, with line numbers. "
-                "Defaults to at most 400 lines; use start_line/end_line for large files."
+                "Defaults to at most 200 lines; use start_line/end_line for large files."
             ),
             "parameters": {
                 "type": "object",
