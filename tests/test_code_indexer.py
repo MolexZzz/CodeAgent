@@ -56,3 +56,25 @@ def greet(name: str) -> str:
     assert "function greet" in text
     assert "def greet(name: str) -> str:" in text
     assert "Say hello." in text
+
+
+def test_extract_symbols_from_valid_java() -> None:
+    source = """
+package com.example.demo;
+
+public class Main {
+    public String greet(String name) {
+        return "Hello, " + name;
+    }
+}
+"""
+    with TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "Main.java"
+        path.write_text(source, encoding="utf-8")
+        symbols = extract_symbols(path)
+
+    assert any(symbol.kind == "class" and symbol.name == "Main" for symbol in symbols)
+    assert any(
+        symbol.kind == "function" and symbol.name == "Main.greet"
+        for symbol in symbols
+    )

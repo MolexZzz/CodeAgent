@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 from rank_bm25 import BM25Okapi
 
-from memcodeagent.memory.code_indexer import extract_symbols
+from memcodeagent.memory.code_indexer import SUPPORTED_CODE_SUFFIXES, extract_symbols
 from memcodeagent.memory.schema import MemoryItem
 from memcodeagent.memory.task_store import TaskMemoryStore
 from memcodeagent.workspace import Workspace
@@ -127,7 +127,7 @@ class HybridRetriever:
     # -- indexing --------------------------------------------------------------
 
     def index_workspace(self) -> str:
-        """Scan workspace Python files, extract code symbols, build BM25 + vector index."""
+        """Scan supported source files, extract code symbols, build BM25 + vector index."""
         previous_docs: dict[str, list[CodeDocument]] = {}
         previous_hashes = dict(self._file_hashes)
         if self._load_index():
@@ -136,17 +136,20 @@ class HybridRetriever:
                 key = doc.path.relative_to(self.workspace.root).as_posix()
                 previous_docs.setdefault(key, []).append(doc)
 
-        python_files = [
-            p for p in self.workspace.root.glob("**/*.py")
-            if p.is_file() and not self.workspace.should_ignore(p)
+        source_files = [
+            p
+            for p in self.workspace.root.glob("**/*")
+            if p.is_file()
+            and p.suffix.lower() in SUPPORTED_CODE_SUFFIXES
+            and not self.workspace.should_ignore(p)
         ]
 
         self._code_docs = []
         self._file_hashes = {}
         reused_files = 0
-        for py_file in python_files:
-            relative = py_file.relative_to(self.workspace.root).as_posix()
-            digest = hashlib.sha256(py_file.read_bytes()).hexdigest()
+        for source_file in source_files:
+            relative = source_file.relative_to(self.workspace.root).as_posix()
+            digest = hashlib.sha256(source_file.read_bytes()).hexdigest()
             self._file_hashes[relative] = digest
             if previous_hashes.get(relative) == digest and relative in previous_docs:
                 documents = previous_docs[relative]
@@ -155,7 +158,7 @@ class HybridRetriever:
                 documents = [
                     CodeDocument(
                         text=sym.to_text(),
-                        path=py_file,
+                        path=source_file,
                         kind=sym.kind,
                         name=sym.name,
                         line=sym.line,
@@ -163,7 +166,7 @@ class HybridRetriever:
                         inherits=sym.inherits,
                         imports=sym.imports,
                     )
-                    for sym in extract_symbols(py_file)
+                    for sym in extract_symbols(source_file)
                 ]
             for doc in documents:
                 self._code_docs.append(
@@ -171,7 +174,7 @@ class HybridRetriever:
                 )
 
         if not self._code_docs:
-            return f"Indexed {len(python_files)} Python files, found 0 code symbols."
+            return f"Indexed {len(source_files)} source files, found 0 code symbols."
 
         # Build BM25 index
         tokenized = [_tokenize(doc.text) for doc in self._code_docs]
@@ -189,7 +192,7 @@ class HybridRetriever:
         self._save_index()
 
         return (
-            f"Indexed {len(python_files)} Python files, extracted {len(self._code_docs)} "
+            f"Indexed {len(source_files)} source files, extracted {len(self._code_docs)} "
             f"code symbols ({reused_files} unchanged files reused; BM25 + vectors + reverse indexes)."
         )
 
