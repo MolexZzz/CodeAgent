@@ -771,7 +771,7 @@ def test_intent_router_explicit_mutation_wins() -> None:
 
 def test_low_confidence_intent_is_auto_resolved(tmp_path: Path) -> None:
     agent = CodingAgent(AgentConfig(workspace=tmp_path), console=Mock())
-    intent = agent._resolve_intent("请处理一下这个问题")
+    intent = IntentRouter.resolve("请处理一下这个问题")
 
     assert intent is not None
     assert intent.mode in {TaskMode.ANSWER, TaskMode.PLAN}

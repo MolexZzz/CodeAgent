@@ -44,7 +44,6 @@ def run(
     console.rule("[bold green]Final")
     console.print(Markdown(result))
 
-
 @app.command()
 def chat(
     workspace: Path = typer.Option(Path.cwd(), "--workspace", "-w", help="Workspace root."),
@@ -77,6 +76,19 @@ def index(
     summary = agent.index_workspace()
     console.print(summary)
 
+"""
+main()：如果你没写子命令，就直接进交互式聊天模式
+run task：一次性执行一个编程任务，跑完后把最终结果打印出来
+chat：进入 REPL 交互模式，支持持续对话
+index：重建/刷新项目的记忆索引
+
+1.从命令行拿参数，比如 --workspace、--max-steps、--dry-run
+2.组装成 AgentConfig
+3.创建 CodingAgent(config=config, console=console)
+4.调用对应方法：- agent.chat()
+- agent.run(task)
+- agent.index_workspace()
+"""
 
 if __name__ == "__main__":
     app()
