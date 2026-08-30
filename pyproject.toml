@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "memcodeagent"
 version = "0.1.0"
-description = "A lightweight CLI coding agent with project memory and code retrieval."
+description = "CodeAgent: a lightweight CLI coding agent with local memory and code retrieval."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
