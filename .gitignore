@@ -10,6 +10,7 @@ venv/
 .env.*
 !.env.example
 .memcode/
+.codegraph/
 dist/
 build/
 
