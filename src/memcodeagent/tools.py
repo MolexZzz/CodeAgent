@@ -176,7 +176,7 @@ class ToolExecutor:
     def _tool_write_file(self, path: str, content: str, overwrite: bool = False) -> str:
         if self.dry_run:
             return f"Dry run: would write {path} ({len(content)} chars)."
-        file_path = self.workspace.resolve_inside(path)
+        file_path = self.workspace.ensure_writable_path(path, allow_existing=overwrite)
         if file_path.exists() and not overwrite:
             raise ValueError(
                 f"{path} already exists. Pass overwrite=true to replace it, or use apply_patch to edit it."

@@ -235,6 +235,132 @@ def test_tool_policy_permission_matrix() -> None:
     ).reason
 
 
+def test_tool_policy_auto_allows_safe_verification_commands() -> None:
+    policy = ToolPolicy()
+    decision = policy.evaluate(
+        phase="TESTING",
+        tool_name="run_command",
+        approval_required=True,
+        command="mvn test",
+    )
+    assert decision.action == PolicyAction.ALLOW
+
+
+def test_tool_policy_denies_destructive_command_chains() -> None:
+    policy = ToolPolicy()
+    decision = policy.evaluate(
+        phase="TESTING",
+        tool_name="run_command",
+        approval_required=True,
+        command="mvn test && Remove-Item -Recurse -Force .",
+    )
+    assert decision.action == PolicyAction.DENY
+
+
+def test_tool_policy_approved_scope_skips_normal_confirmation() -> None:
+    policy = ToolPolicy()
+    decision = policy.evaluate(
+        phase="IMPLEMENTING",
+        tool_name="apply_patch",
+        approval_required=True,
+        approved=True,
+    )
+    assert decision.action == PolicyAction.ALLOW
+
+
+def test_tool_policy_keeps_network_commands_confirmed_after_grant() -> None:
+    policy = ToolPolicy()
+    decision = policy.evaluate(
+        phase="IMPLEMENTING",
+        tool_name="run_command",
+        approval_required=True,
+        command="curl https://example.com",
+        approved=True,
+    )
+    assert decision.action == PolicyAction.CONFIRM
+
+
+def test_filesystem_edit_batch_is_limited_per_task(tmp_path: Path) -> None:
+    agent = CodingAgent(
+        AgentConfig(workspace=tmp_path, filesystem_edit_batch_size=4),
+        console=Mock(),
+    )
+    agent._filesystem_edits_remaining = 0
+    assert agent._filesystem_edit_approval_active("apply_patch") is False
+    agent._filesystem_edits_remaining = 3
+    assert agent._filesystem_edit_approval_active("apply_patch") is True
+    assert agent._filesystem_edit_approval_active("apply_patch") is True
+    assert agent._filesystem_edit_approval_active("apply_patch") is True
+    assert agent._filesystem_edit_approval_active("apply_patch") is False
+
+
+def test_filesystem_batch_preview_shows_compact_badge_and_hint(tmp_path: Path) -> None:
+    agent = CodingAgent(
+        AgentConfig(workspace=tmp_path, filesystem_edit_batch_size=4),
+        console=Mock(),
+    )
+    agent._current_filesystem_batch = [
+        "src/main/java/A.java",
+        "src/main/java/B.java",
+        "src/main/java/C.java",
+        "src/main/java/D.java",
+    ]
+    preview = agent._format_filesystem_batch_preview(
+        "write_file",
+        {"path": "src/main.java", "content": "class A {}"},
+    )
+    assert "+4" in preview
+    assert "write_file" in preview
+
+    details = agent._filesystem_batch_details(
+        "write_file",
+        {"path": "src/main.java", "content": "class A {}"},
+    )
+    assert details == [
+        "src/main/java/A.java",
+        "src/main/java/B.java",
+        "src/main/java/C.java",
+        "src/main/java/D.java",
+    ]
+
+
+def test_filesystem_batch_preview_omits_badge_for_single_file(tmp_path: Path) -> None:
+    agent = CodingAgent(
+        AgentConfig(workspace=tmp_path, filesystem_edit_batch_size=4),
+        console=Mock(),
+    )
+    agent._current_filesystem_batch = ["src/main/java/A.java"]
+    preview = agent._format_filesystem_batch_preview(
+        "write_file",
+        {"path": "src/main.java", "content": "class A {}"},
+    )
+    assert "+1" not in preview
+    assert "+4" not in preview
+
+
+def test_filesystem_batch_hint_matches_actual_batch_size(tmp_path: Path) -> None:
+    agent = CodingAgent(
+        AgentConfig(workspace=tmp_path, filesystem_edit_batch_size=4),
+        console=Mock(),
+    )
+    agent._current_filesystem_batch = ["src/main/java/A.java"]
+    assert agent._filesystem_batch_hint(
+        "write_file",
+        {"path": "src/main.java", "content": "class A {}"},
+    ) == ""
+
+    agent._current_filesystem_batch = [
+        "src/main/java/A.java",
+        "src/main/java/B.java",
+        "src/main/java/C.java",
+        "src/main/java/D.java",
+    ]
+    assert agent._filesystem_batch_hint(
+        "write_file",
+        {"path": "src/main.java", "content": "class A {}"},
+    ) == "+4"
+
+
 def test_tool_targets_are_concise() -> None:
     assert "src/app.py:10-20" in CodingAgent._tool_target(
         "read_file",

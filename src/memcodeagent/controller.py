@@ -299,6 +299,7 @@ class AgentController:
                     protected_test=bool(context.get("protected_test", False)),
                     duplicate=bool(context.get("duplicate", False)),
                     command=str(tool_call.args.get("command", "")),
+                    approved=bool(context.get("approved", False)),
                 )
                 if policy.action == PolicyAction.DENY:
                     observation = ToolObservation(

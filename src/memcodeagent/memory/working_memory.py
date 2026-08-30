@@ -17,6 +17,7 @@ class WorkingMemory:
     verification_kind: str | None = None
     verification_done: bool = False
     verification_passed: bool = False
+    verification_unresolved_error: bool = False
     last_diff_summary: str = ""
     unresolved_issue: str = ""
     recent_tests: list[str] = field(default_factory=list)
@@ -31,6 +32,7 @@ class WorkingMemory:
         self.verification_kind = None
         self.verification_done = False
         self.verification_passed = False
+        self.verification_unresolved_error = False
         self.last_diff_summary = ""
         self.unresolved_issue = ""
         self.recent_tests.clear()
@@ -56,6 +58,7 @@ class WorkingMemory:
             "verification_kind": self.verification_kind,
             "verification_done": self.verification_done,
             "verification_passed": self.verification_passed,
+            "verification_unresolved_error": self.verification_unresolved_error,
             "last_diff_summary": self.last_diff_summary,
             "unresolved_issue": self.unresolved_issue,
             "recent_tests": list(self.recent_tests),
@@ -74,6 +77,7 @@ class WorkingMemory:
         self.verification_kind = str(kind) if kind else None
         self.verification_done = bool(data.get("verification_done", False))
         self.verification_passed = bool(data.get("verification_passed", False))
+        self.verification_unresolved_error = bool(data.get("verification_unresolved_error", False))
         self.last_diff_summary = str(data.get("last_diff_summary", ""))
         self.unresolved_issue = str(data.get("unresolved_issue", ""))
         self.recent_tests = [str(item) for item in data.get("recent_tests", [])][-5:]

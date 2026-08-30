@@ -10,6 +10,9 @@ from typing import Any
 import questionary
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import WordCompleter
+from prompt_toolkit.formatted_text import FormattedText
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.styles import Style
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.status import Status
@@ -20,7 +23,7 @@ from memcodeagent.llm import LlmClient
 from memcodeagent.memory.hybrid_retriever import RetrievalContext
 from memcodeagent.memory_manager import MemoryManager
 from memcodeagent.policy import ToolPolicy
-from memcodeagent.runtime import RuntimeEvent
+from memcodeagent.runtime import Phase, RuntimeEvent
 from memcodeagent.verification import VerificationKind, classify_verification
 from memcodeagent.tools import ToolExecutor, ToolObservation
 from memcodeagent.ui import AgentEvent, AgentEventKind, ToolEvent, ToolEventKind, format_agent_event
@@ -46,6 +49,7 @@ class AgentConfig:
     max_tool_calls: int = 64
     max_test_attempts: int = 5
     max_duplicate_attempts: int = 2
+    filesystem_edit_batch_size: int = 4
 
 
 class TaskMode(str, Enum):
@@ -191,6 +195,8 @@ class CodingAgent:
         self._current_task = ""
         self._history_summary = ""
         self._pending_approval: dict[str, Any] | None = None
+        self._filesystem_edits_remaining = 0
+        self._current_filesystem_batch: list[str] = []
 
     def run(self, task: str) -> str:
         """Single-turn execution through the normal ReAct loop."""
@@ -337,6 +343,7 @@ class CodingAgent:
                     "approval_required": self.config.approval_required,
                     "protected_test": self._is_protected_test_edit(call.name, call.args),
                     "duplicate": self._is_duplicate_call(seen_calls, call),
+                    "approved": self._filesystem_edit_approval_active(call.name),
                 },
             )
             if result is None:
@@ -393,7 +400,8 @@ class CodingAgent:
                 has_changes = True
                 test_failed = self._run_verification_tests(messages)
                 if self._verification_unresolved_error:
-                    self.controller.mark_blocked("verification environment error")
+                    self._phase = "PAUSED"
+                    self.controller.state_machine.phase = Phase.PAUSED
                     last_result = "测试环境或命令错误，任务已暂停。"
                     break
                 current_step_has_error = current_step_has_error or test_failed
@@ -424,6 +432,7 @@ class CodingAgent:
                     return last_result
                 if self._final_completion_checks(messages):
                     self.memory.remember_task(task, last_result)
+                    self.controller.state_machine.phase = Phase.DONE
                     self._phase = "COMPLETED"
                     self._save_session(messages)
                     return last_result
@@ -468,6 +477,7 @@ class CodingAgent:
         self._last_diff_summary = ""
         self._last_verification_command = ""
         self._last_completion_report = ""
+        self._filesystem_edits_remaining = 0
         self._protected_test_files = (
             self._snapshot_test_files()
             if self.config.protect_existing_tests
@@ -604,10 +614,15 @@ class CodingAgent:
     ) -> ControllerStep | None:
         """Run one model decision and its local tool calls."""
         try:
+            def _before_tools(decision: Any) -> None:
+                self._set_current_filesystem_batch(decision.tool_calls)
+                if before_tools is not None:
+                    before_tools(decision)
+
             if stream:
                 result = self.controller.step(
                     messages,
-                    before_tools=before_tools,
+                    before_tools=_before_tools,
                     tool_context=tool_context,
                     stream=True,
                     on_chunk=on_chunk,
@@ -619,7 +634,7 @@ class CodingAgent:
                     self.console.print("[dim]Thinking...[/dim]")
                 result = self.controller.step(
                     messages,
-                    before_tools=before_tools,
+                    before_tools=_before_tools,
                     tool_context=tool_context,
                 )
         except RuntimeError:
@@ -628,9 +643,22 @@ class CodingAgent:
         except KeyboardInterrupt:
             self.controller.mark_interrupted()
             return None
+        finally:
+            self._current_filesystem_batch = []
 
         self._record_usage(result.decision)
         return result
+
+    def _set_current_filesystem_batch(self, tool_calls: list[Any]) -> None:
+        batch: list[str] = []
+        for tool_call in tool_calls or []:
+            name = str(getattr(tool_call, "name", ""))
+            if not self._is_filesystem_edit_tool(name):
+                continue
+            args = getattr(tool_call, "args", {}) or {}
+            path = str(args.get("path", "<unknown>")).replace("\\", "/")
+            batch.append(path)
+        self._current_filesystem_batch = batch[: max(1, self.config.filesystem_edit_batch_size)]
 
     def _run_verification_tests(self, messages: list[dict[str, Any]]) -> bool:
         """Run the project's test suite after a code-modifying tool call and feed the
@@ -770,7 +798,16 @@ class CodingAgent:
             for tool_call in decision.tool_calls:
                 call_key = (tool_call.name, json.dumps(tool_call.args, sort_keys=True, ensure_ascii=False))
                 allowed_tools = _READ_ONLY_TOOLS
-                if tool_call.name not in allowed_tools:
+                command = str(tool_call.args.get("command", ""))
+                risk, _ = ToolPolicy.command_risk(command) if tool_call.name == "run_command" else ("normal", "")
+                if tool_call.name == "run_command" and risk not in {"normal", "external"}:
+                    observation = ToolObservation(
+                        tool_call.name,
+                        False,
+                        f"{mode.value} 模式下只允许安全命令；{tool_call.name} 已被 Runtime 拒绝。",
+                        tool_call.id,
+                    )
+                elif tool_call.name not in allowed_tools and tool_call.name != "run_command":
                     observation = ToolObservation(
                         tool_call.name,
                         False,
@@ -1022,7 +1059,7 @@ class CodingAgent:
                     test_failed = self._run_verification_tests(messages)
                     pending_edits = 0
                     if self._verification_unresolved_error:
-                        self.controller.mark_blocked("verification environment error")
+                        self.controller.state_machine.phase = Phase.PAUSED
                         self._print_agent_event(
                             AgentEventKind.ALERT,
                             "测试环境异常",
@@ -1352,13 +1389,14 @@ class CodingAgent:
 
     @staticmethod
     def _strip_tool_protocol(text: str) -> str:
-        cleaned = text.replace("<tool_call>", "").replace("</tool_call>", "")
+        cleaned = str(text).replace("<tool_call>", "").replace("</tool_call>", "")
         cleaned = cleaned.replace("<tool-result>", "").replace("</tool-result>", "")
         return cleaned
 
     @staticmethod
     def _limit_response(text: str, limit: int = 12000) -> str:
         """Keep abnormal model output from flooding the terminal or session UI."""
+        text = str(text)
         if len(text) <= limit:
             return text
         return text[:limit] + "\n...[final response truncated by runtime]"
@@ -1381,6 +1419,18 @@ class CodingAgent:
         """Require confirmation only for operations that can change state."""
         return self.config.approval_required and tool_name in {"write_file", "apply_patch", "run_command"}
 
+    @staticmethod
+    def _is_filesystem_edit_tool(name: str) -> bool:
+        return name in {"write_file", "apply_patch"}
+
+    def _filesystem_edit_approval_active(self, tool_name: str) -> bool:
+        if not self._is_filesystem_edit_tool(tool_name):
+            return False
+        if self._filesystem_edits_remaining <= 0:
+            return False
+        self._filesystem_edits_remaining -= 1
+        return True
+
     def _confirm_tool(self, name: str, args: dict[str, Any], policy: Any | None = None) -> bool:
         self._pending_approval = {
             "tool": name,
@@ -1392,19 +1442,102 @@ class CodingAgent:
             suffix = f" ({reason})" if reason else ""
             self.console.print()
             self.console.print("[bold yellow]Approval required[/bold yellow]")
-            self.console.print(
-                f"[yellow]{self._tool_summary(name, args)}{suffix}[/yellow]"
-            )
-            answer = questionary.confirm(
-                "Allow this operation? (yes/no)",
-                default=False,
-            ).ask()
+            if self._is_filesystem_edit_tool(name):
+                self.console.print(self._format_filesystem_batch_preview(name, args))
+                answer = self._prompt_filesystem_batch_confirmation(name, args)
+            else:
+                self.console.print(f"[yellow]{self._tool_summary(name, args)}{suffix}[/yellow]")
+                answer = questionary.confirm(
+                    "Allow this operation? (yes/no)",
+                    default=False,
+                ).ask()
+            if answer:
+                if self._is_filesystem_edit_tool(name):
+                    self._filesystem_edits_remaining = max(
+                        0,
+                        self.config.filesystem_edit_batch_size - 1,
+                    )
             return bool(answer)
         except (KeyboardInterrupt, EOFError):
             self._stop_requested = True
             return False
         finally:
             self._pending_approval = None
+
+    def _format_filesystem_batch_preview(self, name: str, args: dict[str, Any]) -> str:
+        summary = self._tool_summary(name, args)
+        batch_files = self._filesystem_batch_file_names(name, args)
+        batch_size = len(batch_files)
+        badge = f" [bold cyan][+{batch_size}][/bold cyan]" if batch_size > 1 else ""
+        return f"[yellow]{summary}[/yellow]{badge}"
+
+    def _filesystem_batch_file_names(self, name: str, args: dict[str, Any]) -> list[str]:
+        if self._current_filesystem_batch:
+            return self._current_filesystem_batch
+        if self._is_filesystem_edit_tool(name):
+            path = str(args.get("path", "<unknown>")).replace("\\", "/")
+            return [path]
+        return []
+
+    def _filesystem_batch_details(self, name: str, args: dict[str, Any]) -> list[str]:
+        batch_files = self._filesystem_batch_file_names(name, args)
+        if not batch_files:
+            return [self._tool_summary(name, args)]
+        return batch_files[:4]
+
+    def _prompt_filesystem_batch_confirmation(self, name: str, args: dict[str, Any]) -> bool:
+        expanded = {"value": False}
+        bindings = KeyBindings()
+
+        @bindings.add("tab")
+        def _toggle(event: Any) -> None:
+            expanded["value"] = not expanded["value"]
+            event.app.invalidate()
+
+        style = Style.from_dict(
+            {
+                "prompt": "yellow bold",
+                "badge": "cyan bold",
+                "hint": "gray",
+                "line": "yellow",
+            }
+        )
+
+        def bottom_toolbar() -> FormattedText:
+            if not expanded["value"]:
+                hint = self._filesystem_batch_hint(name, args)
+                if not hint:
+                    return FormattedText([("class:hint", "")])
+                return FormattedText(
+                    [("class:hint", "Tab 展开文件名 | "), ("class:badge", hint)]
+                )
+            details = self._filesystem_batch_details(name, args)
+            return FormattedText(
+                [
+                    ("class:line", f"{index + 1}. {file_name}\n")
+                    for index, file_name in enumerate(details)
+                ]
+            )
+
+        session = PromptSession(key_bindings=bindings, style=style)
+        try:
+            response = session.prompt(
+                FormattedText(
+                    [
+                        ("class:prompt", "Allow this operation? (yes/no) "),
+                    ]
+                ),
+                bottom_toolbar=bottom_toolbar,
+            ).strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            self._stop_requested = True
+            return False
+        return response in {"y", "yes"}
+
+    def _filesystem_batch_hint(self, name: str, args: dict[str, Any]) -> str:
+        batch_files = self._filesystem_batch_file_names(name, args)
+        batch_size = len(batch_files)
+        return f"+{batch_size}" if batch_size > 1 else ""
 
     @staticmethod
     def _tool_summary(name: str, args: dict[str, Any]) -> str:
@@ -1490,12 +1623,8 @@ class CodingAgent:
         )
         working.verification_done = self._verification_done
         working.verification_passed = self._verification_passed
+        working.verification_unresolved_error = self._verification_unresolved_error
         working.last_diff_summary = self._last_diff_summary
-        working.unresolved_issue = (
-            "verification environment or command error"
-            if self._verification_unresolved_error
-            else ""
-        )
 
     def _restore_working_memory(self, data: dict[str, Any] | None) -> None:
         self.memory.working_memory.restore_state(data)
@@ -1518,7 +1647,7 @@ class CodingAgent:
         self._verification_done = working.verification_done
         self._verification_passed = working.verification_passed
         self._last_diff_summary = working.last_diff_summary
-        self._verification_unresolved_error = bool(working.unresolved_issue)
+        self._verification_unresolved_error = bool(working.verification_unresolved_error)
 
     @property
     def _phase(self) -> str:
@@ -1586,13 +1715,11 @@ class CodingAgent:
 
     @property
     def _verification_unresolved_error(self) -> bool:
-        return bool(self.memory.working_memory.unresolved_issue)
+        return bool(self.memory.working_memory.verification_unresolved_error)
 
     @_verification_unresolved_error.setter
     def _verification_unresolved_error(self, value: bool) -> None:
-        self.memory.working_memory.unresolved_issue = (
-            "verification environment or command error" if value else ""
-        )
+        self.memory.working_memory.verification_unresolved_error = bool(value)
 
     def _restore_runtime_state(self, data: dict[str, Any]) -> None:
         controller_state = data.get("controller")
