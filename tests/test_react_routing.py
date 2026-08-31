@@ -4,7 +4,7 @@ from unittest.mock import Mock, patch
 
 from rich.console import Console
 
-from memcodeagent.agent import AgentConfig, CodingAgent
+from memcodeagent.agent import AgentConfig, CodingAgent, TaskMode
 from memcodeagent.llm import AgentDecision
 from memcodeagent.memory.hybrid_retriever import RetrievalContext
 from memcodeagent.policy import PolicyAction, ToolPolicy
@@ -58,15 +58,16 @@ def test_inspecting_phase_does_not_block_a_safe_edit() -> None:
     assert decision.action == PolicyAction.ALLOW
 
 
-def test_read_only_mode_does_not_execute_shell_commands(tmp_path: Path) -> None:
+def test_read_only_mode_rejects_destructive_shell_commands(tmp_path: Path) -> None:
     console = Console(file=StringIO())
     agent = CodingAgent(AgentConfig(workspace=tmp_path, max_steps=1), console=console)
     agent.tools.execute = Mock()
+    agent._save_session = Mock()
 
     call = Mock()
     call.id = "run-1"
     call.name = "run_command"
-    call.args = {"command": "echo unsafe"}
+    call.args = {"command": "rm -rf unsafe"}
     decision = AgentDecision(
         tool_calls=[call],
         assistant_message={
