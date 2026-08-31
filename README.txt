@@ -1,28 +1,31 @@
-Git 仓库地址：https://github.com/MolexZzz/CodeAgent.git
+CodeAgent 项目说明
 
-项目简介：
-CodeAgent 是一个轻量级命令行编程智能体。它通过大语言模型决定下一步动作，但文件读写、文本搜索、命令执行、上下文管理、模型输出解析、循环终止和错误处理等关键逻辑都由本项目自行实现，不依赖 LangChain、LlamaIndex、OpenAI Agents SDK、AutoGen、CrewAI 等框架。
+Git 仓库地址：
+https://github.com/MolexZzz/CodeAgent
 
-常用方式：
-1. 安装 Python 3.11+。
-2. 在项目根目录执行：python -m pip install -e .[dev]
-3. 设置环境变量 OPENAI_API_KEY，可选设置 OPENAI_BASE_URL 和 MEMCODE_MODEL。
-4. 运行：mca
-5. 执行单次任务：mca run "修复一个测试失败并补充测试"
+一、项目简介
+CodeAgent 是一个面向本地代码仓库的命令行编程智能体。它可根据自然语言完成代码探索、规划、修改、命令执行、测试验证和结果总结，核心能力均自行实现。
 
-工作原理：
-1. 先从本地代码索引、任务历史和项目规则中检索上下文。
-2. 再请求模型决定下一步动作。
-3. 本地执行工具调用，并把结果写回上下文。
-4. 持续循环，直到任务完成、暂停、失败或达到预算上限。
+二、安装与运行
+环境：Python 3.11+。
 
-本地数据：
-1. .memcode/memory.json：任务历史、修改文件、失败命令、经验摘要。
-2. .memcode/project_memory.json：项目级规则。
-3. .memcode/session.json：会话快照。
-4. .memcode/transcript.jsonl：追加式对话记录。
-5. .memcode/code_index.json 和 .memcode/code_vectors.npy：本地代码索引。
+1. 在项目根目录安装：
+   python -m pip install -e ".[dev]"
+2. 将 .env.example 复制为 .env，填写 OPENAI_API_KEY。默认使用 OpenAI；使用 DeepSeek、Kimi 等提供 OpenAI 兼容接口的服务时，再填写服务地址 OPENAI_BASE_URL，并用 MEMCODE_MODEL 指定模型名称。
+3. 进入项目根目录后启动交互环境：
+   mca
+4. 进入交互环境后，可输入 /help 查看所有可用指令及其功能。
+5. 在项目根目录执行单次任务，文本可替换为实际需求：
+   mca run "<任务描述>"
+6. 在项目根目录建立或刷新代码索引：
+   mca index
+   如果终端不在目标项目目录，可在上述命令后追加 --workspace "<项目路径>"；不追加时默认使用当前终端所在目录。索引目前仅支持 Python 和 Java。
 
-说明：
-1. mca index --workspace 用来重建本地代码索引。
-2. 最常用的入口是 mca。
+三、特色功能
+1. 自主开发闭环：基于 ReAct 循环理解任务、检索上下文、调用工具、修改代码并持续验证。
+2. 混合代码检索：支持 Python、Java 的符号、关键词、语义和调用关系检索，可增量更新。
+3. 持久化记忆：本地保存任务摘要、操作记录和会话状态，重启后可继续任务。
+4. 安全审批：Agent 只能访问指定项目目录；修改文件或执行命令前需确认。
+5. 交互模式：支持 /history 查看历史、/plan 制定方案、/explain 只读解释。
+6. 自动验证：修改后可运行测试；失败命令会记录原因并尝试修复。
+7. 模块化架构：独立实现模型调用、工具执行、代码检索、记忆管理和状态控制，便于扩展和维护。
